@@ -14,12 +14,13 @@
 
     "//_Economic_Parameters": "----------------------------------------------",
     "delta": 0.0125,
-    "kappa_factor": 1,
+    "kappa_factor": 1.5,
     "L_total": 39000000000.0,
     "wage_rate": 16.9,
     "labor_mult": 1,
     "g_step": 0.01,
     "c_step": 0.0,
+
 
     "//_OU_Process_Parameters": "--------------------------------------------",
     "drift": 0.012,

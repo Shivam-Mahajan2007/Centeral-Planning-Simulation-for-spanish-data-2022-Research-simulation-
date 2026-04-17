@@ -102,11 +102,10 @@ function compute_investment(G_hat, A_bar, kappa, C_prev, G_vec, g_step, c_step; 
     C_prev_v = _v(C_prev)
     G_vec_v  = _v(G_vec)
     g        = Float64(g_step)
-    c_s      = Float64(c_step)
 
     # 1. Consumption growth term: (MC + (MC)^2) C_{t-1}
     # Enforce a minimum capacity expansion target (c_step) to proactively relieve bottlenecks
-    gC      = max.(G_hat_v, c_s)
+    gC      = max.(G_hat_v, 0)
     Gv      = gC .* C_prev_v
     term1_C = kappa_v .* neumann_apply(A_bar, Gv, k)
     term2_C = kappa_v .* neumann_apply(A_bar, gC .* term1_C, k)

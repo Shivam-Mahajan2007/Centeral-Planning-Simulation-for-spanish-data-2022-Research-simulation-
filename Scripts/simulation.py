@@ -73,8 +73,10 @@ def run_quarter(state: ModelState) -> ModelState:
     else:
         C_hat = revealed_demand(state.C_monthly, state.P_monthly, state.P, state.C)
         G_hat_raw = infer_growth(C_hat, state.C)
+        # 2-period rolling average (temporal smoothing)
         G_hat = (G_hat_raw + getattr(state, 'G_hat_prev', G_hat_raw)) / 2.0
         state.G_hat_prev = G_hat.copy()
+        
     logger.info(f"   G_hat  mean={G_hat.mean()*100:.3f}%  max={G_hat.max()*100:.3f}%")
 
     # --- Government expenditure (grows at g_step per quarter) ---------------
