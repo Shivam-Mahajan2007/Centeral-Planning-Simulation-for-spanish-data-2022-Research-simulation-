@@ -1,0 +1,26 @@
+# ── Directories ──
+__pycache__/
+.pytest_cache/
+venv/
+env/
+.env
+
+# ── Compiled Python ──
+*.pyc
+*.pyo
+*.pyd
+
+# ── IDE & OS ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Julia ──
+*.so                        # compiled system image (build_sysimage.jl output)
+_precompile_exec.jl         # temp file auto-created and deleted by build_sysimage.jl
+Scripts/__pycache__/        # Julia bytecode cache written by juliacall
+
+# ── Simulation outputs ──
+Results/                    # generated charts, PDFs, checkpoints — often large
+Data/.data_cache.pkl        # cached parsed spreadsheet data, regenerates automatically
