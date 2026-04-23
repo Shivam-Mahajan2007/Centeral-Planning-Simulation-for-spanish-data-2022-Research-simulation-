@@ -178,7 +178,7 @@ def solve_planner(alpha, A, B, l, l_tilde, dK, K, L_total, G_vec, gamma,
                   eta_K=0.15, eta_L=0.15, max_iter=2000):
     # Note: C_prev, lambda_K_prev, lambda_L_prev are accepted for API
     # compatibility with simulation.py but NOT forwarded to the Julia
-    # Nesterov solver (v3), which deliberately uses cold-start only.
+    # Adaptive Dual Ascent (Nesterov) solver, which deliberately uses cold-start only.
     a_jl  = np.asarray(alpha,   dtype=np.float64)
     A_jl  = _to_dense(A)
     B_jl  = _to_dense(B)

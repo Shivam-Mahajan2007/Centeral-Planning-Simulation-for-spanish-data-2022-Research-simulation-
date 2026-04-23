@@ -25,7 +25,7 @@ def solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=None,
     eps_val = 1e-15
     n       = len(alpha)
 
-    # Default gamma to zero (Cobb-Douglas) if not provided
+    # Default LES subsistence thresholds to zero if not provided
     if gamma is None:
         gamma = np.zeros(n)
 
