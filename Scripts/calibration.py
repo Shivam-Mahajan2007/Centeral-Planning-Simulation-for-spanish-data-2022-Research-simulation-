@@ -7,7 +7,7 @@ from typing import List
 
 logger = logging.getLogger(__name__)
 
-from julia_bridge import neumann_apply
+from julia_bridge import CORE, _to_dense
 
 
 # --- Sector capital intensity ------------------------------------------------
@@ -17,28 +17,30 @@ def _kappa(sector_names: List[str]) -> np.ndarray:
     Return the diagonal of B (capital-coefficient matrix) as a 1-D array.
 
     kappa[i] = units of capital required per unit of output in sector i.
-    Unrecognised sectors default to kappa = 0.8.
+    These are annual base values; multiply by kappa_factor (typically 4)
+    to convert to quarterly units.
+    Unrecognised sectors default to kappa = 0.50.
     """
-    k = np.ones(len(sector_names)) * 0.8
+    k = np.ones(len(sector_names)) * 0.50
     for i, name in enumerate(sector_names):
         nm = name.lower()
-        if "real estate" in nm or "imputed rent" in nm:              k[i] = 5.0
-        elif any(x in nm for x in ["electricity", "gas", "steam"]):  k[i] = 3.5
-        elif any(x in nm for x in ["mining", "quarrying"]):          k[i] = 3.0
-        elif "petroleum" in nm or "coke" in nm:                      k[i] = 2.5
-        elif any(x in nm for x in ["water supply", "natural water"]): k[i] = 2.0
-        elif any(x in nm for x in ["sewerage", "waste"]):            k[i] = 1.5
-        elif any(x in nm for x in ["agricultur", "forestr", "fish"]): k[i] = 1.5
+        if "real estate" in nm or "imputed rent" in nm:              k[i] = 3.10
+        elif any(x in nm for x in ["electricity", "gas", "steam"]):  k[i] = 2.17
+        elif any(x in nm for x in ["mining", "quarrying"]):          k[i] = 1.86
+        elif "petroleum" in nm or "coke" in nm:                      k[i] = 1.55
+        elif any(x in nm for x in ["water supply", "natural water"]): k[i] = 1.24
+        elif any(x in nm for x in ["sewerage", "waste"]):            k[i] = 0.93
+        elif any(x in nm for x in ["agricultur", "forestr", "fish"]): k[i] = 0.93
         elif any(x in nm for x in ["chemical", "pharmaceutical",
-                                    "motor vehicle"]):               k[i] = 1.2
+                                    "motor vehicle"]):               k[i] = 0.74
         elif any(x in nm for x in ["food", "textile", "wood", "paper",
                                     "rubber", "plastic", "fabricated metal",
                                     "electrical", "machinery",
-                                    "basic metal"]):                 k[i] = 1.0
-        elif "construct" in nm:                                      k[i] = 0.5
-        elif any(x in nm for x in ["financial", "insurance"]):       k[i] = 0.5
+                                    "basic metal"]):                 k[i] = 0.62
+        elif "construct" in nm:                                      k[i] = 0.31
+        elif any(x in nm for x in ["financial", "insurance"]):       k[i] = 0.31
         elif any(x in nm for x in ["telecommunication",
-                                    "computer programming"]):        k[i] = 0.6
+                                    "computer programming"]):        k[i] = 0.37
     return k
 
 
@@ -174,32 +176,38 @@ class ModelState:
     # -- static ----------------------------------------------------------------
     n:            int
     A:            object          # scipy.sparse.csr_matrix
-    A_bar:        object          # scipy.sparse.csr_matrix  (A + delta*diag(kappa))
-    B:            np.ndarray      # 1-D kappa vector  (diagonal of capital matrix)
+    A_bar:        object          # scipy.sparse.csr_matrix  (A + delta*B)
+    B:            object          # scipy.sparse.csr_matrix  (Capital coefficient matrix)
     l_tilde:      np.ndarray      # (I - A_bar)^(-T) @ l,  precomputed at calibration
     v_per_unit:   np.ndarray      # value-added per physical unit (EUR/unit)
     l_vec:        np.ndarray
     L_total:      float
     delta:        float
-    drift:        float
-    kappa_ou:     float           # Preference mean-reversion speed
+    max_iter:     int             # Maximum dual ascent iterations per quarter
+    drift_slow:   float           # Volatility of structural preference shifts
+    drift_fast:   float           # Volatility of short-term transitory "fads"
+    kappa_slow:   float           # Mean-reversion speed of slow factor to habit
+    kappa_fast:   float           # Mean-reversion speed of fast factor to slow factor
     wage_rate:    float           # Homogeneous wage rate (EUR/hour)
     neumann_k:    int             # Number of Neumann iterations
     primal_tol:   float           # Solver primal tolerance
     dual_tol:     float           # Solver dual tolerance
     eta_K:        float           # Dual ascent step size for capital constraint
     eta_L:        float           # Dual ascent step size for labour constraint
-    max_iter:     int             # Maximum dual ascent iterations per quarter
+    inflation_target: float       # Quarterly inflation target (0.01 = 1%)
     sector_names: List[str]
     sector_short: List[str]
-    # -- dynamic ---------------------------------------------------------------
-    t:            int           = 0
-    K:            np.ndarray    = field(default_factory=lambda: np.array([]))
+    # -- dynamics --------------------------------------------------------------
+    t:            int
+    K:            np.ndarray      # (N,) Total capital stock per good
+    K_firms:      np.ndarray      # (5, N) Capital per firm, per capital type
     G:            np.ndarray    = field(default_factory=lambda: np.array([]))
     g_step:       float         = 0.0    # per-quarter growth rate
     c_step:       float         = 0.015  # per-quarter minimum capacity growth target
     alpha:        np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_true:   np.ndarray    = field(default_factory=lambda: np.array([]))
+    alpha_slow:   np.ndarray    = field(default_factory=lambda: np.array([]))
+    alpha_habit:  np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_bar:    np.ndarray    = field(default_factory=lambda: np.array([]))
     P:            np.ndarray    = field(default_factory=lambda: np.array([]))
     C:            np.ndarray    = field(default_factory=lambda: np.array([]))
@@ -207,9 +215,9 @@ class ModelState:
     Y:            float         = 0.0
     C_monthly:    np.ndarray    = field(default_factory=lambda: np.zeros((3, 1)))
     P_monthly:    np.ndarray    = field(default_factory=lambda: np.zeros((3, 1)))
-    rng:          object        = field(default_factory=lambda: np.random.default_rng(42))
+    rng:          object        = field(default_factory=lambda: np.random.default_rng())
     G_hat_init:   np.ndarray    = field(default_factory=lambda: np.array([]))
-    G_hat_prev:   np.ndarray    = field(default_factory=lambda: np.array([]))
+    G_hat_raw_prev: np.ndarray    = field(default_factory=lambda: np.array([]))
     dK_0:         np.ndarray    = field(default_factory=lambda: np.array([]))
     history:      list          = field(default_factory=list)
     slim_history: bool          = False
@@ -220,6 +228,10 @@ class ModelState:
     pi_0_fixed:   np.ndarray    = field(default_factory=lambda: np.array([]))
     dual_weight_0: np.ndarray   = field(default_factory=lambda: np.array([]))
     C_0_init:     np.ndarray    = field(default_factory=lambda: np.array([]))
+    gamma:        np.ndarray    = field(default_factory=lambda: np.array([]))
+    lambda_K_0:   np.ndarray    = field(default_factory=lambda: np.array([]))
+    lambda_L_0:   float         = 0.0
+    CPI_chained:  float         = 1.0
     # Backward-compat alias: expose v_per_unit also as .v for Julia bridge
     @property
     def v(self) -> np.ndarray:
@@ -230,10 +242,12 @@ class ModelState:
 
 def calibrate(data: dict,
               delta:        float = 0.0125,
-              drift:        float = 0.012,
+              drift_slow:   float = 0.005,
+              drift_fast:   float = 0.035,
+              kappa_slow:   float = 0.05,
+              kappa_fast:   float = 0.8,
               neumann_k:    int   = 20,
               kappa_factor: float = 1.0,
-              kappa_ou:     float = 0.15,
               L_total:      float = 9.75e9,
               wage_rate:    float = 11.2,
               labor_mult:   float = 1.0,
@@ -244,6 +258,8 @@ def calibrate(data: dict,
               max_iter:     int   = 2000,
               g_step:       float = 0.0,
               c_step:       float = 0.015,
+              nominal_consumption_annual: float = 807e9,
+              inflation_target: float = 0.0,
               slim_history: bool  = None) -> ModelState:
     """
     Build and return a fully calibrated ModelState from the IO data dict.
@@ -310,13 +326,33 @@ def calibrate(data: dict,
     # For dead sectors (V = 0) this naturally yields X_real = 0.
     X_real = V / np.maximum(v_per_unit, 1e-12)
 
-    # -- kappa (diagonal of B) -----------------------------------------------
-    kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
-            else _kappa(sector_names)
-    kappa = kappa * kappa_factor
+    # -- B (Capital matrix): diagonal + random off-diagonal ------------------
+    diag_kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
+                 else _kappa(sector_names)
+    diag_kappa = diag_kappa * 1.3 * kappa_factor
+    
+    # Construct B as sparse: diag(kappa) + random noise
+    # Density: ~5%. Range: [0.01, 0.09]
+    B_diag = sp.diags(diag_kappa, format="csr")
+    
+    # Generate off-diagonal noise
+    rng_cal = np.random.default_rng(42)
+    noise_density = 0.05
+    n_noise = int(n * n * noise_density)
+    rows = rng_cal.integers(0, n, size=n_noise)
+    cols = rng_cal.integers(0, n, size=n_noise)
+    vals = rng_cal.uniform(0.05, 0.25, size=n_noise)
+    
+    B_noise = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    # Combine and ensure diagonal is exactly diag_kappa
+    B = B_diag + B_noise
+    B = B.tolil()
+    B.setdiag(diag_kappa)
+    B = B.tocsr()
+    B.eliminate_zeros()
 
-    # -- Eq. 6: A_bar = A + delta * diag(kappa) ------------------------------
-    A_bar = A + delta * sp.diags(kappa, format="csr")
+    # -- Eq. 6: A_bar = A + delta * B ----------------------------------------
+    A_bar = A + delta * B
     A_bar.eliminate_zeros()
 
     # Spectral radius check
@@ -337,11 +373,10 @@ def calibrate(data: dict,
             logger.warning(f"[calibration] Gershgorin rho(A_bar) <= {rho:.4f}  (check stability!)")
 
     # -- Initial cost-push prices P_real -------------------------------------
-    P_real = neumann_apply(A.T, v_per_unit, k=neumann_k)
-    P_0_raw = P_real  # Alias for compatibility if needed
+    P_real = np.asarray(CORE.neumann_apply(_to_dense(A.T), np.asarray(v_per_unit, dtype=np.float64), neumann_k))
 
     # -- Nominal anchor ------------------------------------------------------
-    Y_0 = 201.75e9   # 201.75 B EUR
+    Y_0 = nominal_consumption_annual / 4.0
 
     # -- Initial physical demand C_0 and G_0 ---------------------------------
     C_0 = C_hh / np.where(P_real > 1e-30, P_real, 1e-30)
@@ -355,65 +390,83 @@ def calibrate(data: dict,
     v1 = g_init * C_0 + g_step * G_0
     v2 = (g_init**2) * C_0 + (g_step**2) * G_0
 
-    term1 = kappa * neumann_apply(A_bar, v1, k=neumann_k)
-    inner_v2 = neumann_apply(A_bar, v2, k=neumann_k)
-    term2 = kappa * neumann_apply(A_bar, kappa * inner_v2, k=neumann_k)
+    term1 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(v1, dtype=np.float64), neumann_k))
+    inner_v2 = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(v2, dtype=np.float64), neumann_k))
+    term2 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(B @ inner_v2, dtype=np.float64), neumann_k))
     dK_0 = term1 + term2
 
     # -- Initial Capital -----------------------------------------------------
-    # Ensuring K_0 supports both X_real and the specific requirements for G and dK
-    K_0 = kappa * neumann_apply(A_bar,C_0 + G_0 + dK_0, k=neumann_k)
+    K_0 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k))
 
     # -- Preferences and base basket -----------------------------------------
     exp = np.where(P_real * C_0 > 0, P_real * C_0, 0.0)
     alpha_0 = exp / max(exp.sum(), 1e-10)
 
-    P_0 = np.where(C_0 > 1e-12, Y_0 * alpha_0 / C_0, 0.0)
+    # Use np.divide to safely handle zeros in C_0 and avoid RuntimeWarnings
+    P_0 = np.divide(Y_0 * alpha_0, C_0, out=np.zeros_like(C_0), where=C_0 > 1e-12)
 
     logger.info(f"[calibration] Initial Prices anchored "
                 f"(implied price level: {(P_0.mean() / max(P_real.mean(), 1e-30)):.4f})")
 
     # -- Labour proxy --------------------------------------------------------
     l_vec = (v_per_unit.copy() / wage_rate) * labor_mult
-    l_tilde = neumann_apply(A_bar.T, l_vec, k=neumann_k)
+    l_tilde = np.asarray(CORE.neumann_apply(_to_dense(A_bar.T), np.asarray(l_vec, dtype=np.float64), neumann_k))
 
     # -- Initial demand push -------------------------------------------------
     G_hat_init = np.where(C_0 > 0, g_init, 0.0)
 
     mem_A_MB = (A_bar.data.nbytes + A_bar.indices.nbytes
                 + A_bar.indptr.nbytes) / 1e6
-    logger.info(f"[calibration] n={n:,}  nnz={A_bar.nnz:,}  "
-                f"A_bar mem={mem_A_MB:.1f} MB")
+    logger.info(f"[calibration] n={n:,}  nnz(B)={B.nnz:,}  nnz(A_bar)={A_bar.nnz:,}")
     logger.info(f"[calibration] Y0={Y_0/1e9:.1f}B EUR  "
                 f"K0={K_0.sum()/1e9:.1f}B units  "
-                f"dK_0={dK_0.sum()/1e9:.1f}B units  "
-                f"C0={C_0.sum()/1e9:.1f}B units/quarter  "
-                f"delta={delta}")
+                f"C0={C_0.sum()/1e9:.1f}B units/quarter")
     logger.info(f"[calibration] X_real (from V/v_per_unit): "
                 f"total={X_real.sum()/1e9:.1f}B EUR-equiv units/quarter")
 
+    # -- Firm Layer Initialisation -------------------------------------------
+    # We create 5 firms. Each firm has its own vector of capital goods.
+    # We split the total demand between 5 firms, compute each firm's production,
+    # then determine the capital required for that production.
+    B_dense = B.toarray()
+    shares = np.abs(np.random.normal(0.20, 0.02, 5))
+    shares /= shares.sum()
+    demand_total = C_0 + G_0 + dK_0
+    X_firm = np.zeros((n, 5))
+    K_firms = np.zeros((5, n))
+    for f in range(5):
+        demand_f = demand_total * shares[f]
+        X_firm[:, f] = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(demand_f, dtype=np.float64), neumann_k))
+        K_firms[f, :] = B_dense @ X_firm[:, f]
+            
     state = ModelState(
-        n=n, A=A, A_bar=A_bar, B=kappa,
+        n=n, A=A, A_bar=A_bar, B=B,
         l_tilde=l_tilde,
         v_per_unit=v_per_unit,
-        l_vec=l_vec, L_total=L_total, delta=delta, drift=drift,
-        kappa_ou=kappa_ou, wage_rate=wage_rate,
+        l_vec=l_vec, L_total=L_total, delta=delta, 
+        drift_slow=drift_slow, drift_fast=drift_fast,
+        kappa_slow=kappa_slow, kappa_fast=kappa_fast,
+        wage_rate=wage_rate,
         neumann_k=neumann_k,
         primal_tol=primal_tol, dual_tol=dual_tol,
         eta_K=eta_K, eta_L=eta_L, max_iter=max_iter,
+        inflation_target=inflation_target,
         sector_names=sector_names, sector_short=sector_short,
         t=0,
         K=K_0.copy(),
+        K_firms=K_firms,
         G=G_0.copy(),
         g_step=float(g_step),
         c_step=float(c_step),
         alpha=alpha_0.copy(), alpha_true=alpha_0.copy(),
+        alpha_slow=alpha_0.copy(),
+        alpha_habit=alpha_0.copy(),
         alpha_bar=alpha_0.copy(),
         P=P_0.copy(), C=C_0.copy(), X=X_real.copy(), Y=Y_0,
         C_monthly=np.tile(C_0 / 3, (3, 1)),
         P_monthly=np.tile(P_0,     (3, 1)),
         G_hat_init=G_hat_init,
-        G_hat_prev=G_hat_init.copy(),
+        G_hat_raw_prev=G_hat_init.copy(),
         dK_0=dK_0.copy(),
     )
     if slim_history is None:
@@ -423,14 +476,15 @@ def calibrate(data: dict,
     state.slim_history = slim_history
 
     # -- Initial VAL_0 for the income formula --------------------------------
-    pi_0 = np.where(C_0 > 1e-12, alpha_0 / C_0, 0.0)
+    pi_0 = np.divide(alpha_0, C_0, out=np.zeros_like(alpha_0), where=C_0 > 1e-12)
 
     state.P_0             = P_0.copy()
     state.C_0_init        = C_0.copy()
+    state.gamma           = 0.20 * C_0.copy()
     state.VAL_0_Laspeyres = 1.0
     state.pi_0_fixed      = np.array([])
     state.dual_weight_0   = np.array([])
     state.Y_0_init        = float(Y_0)
-    state.B               = kappa.copy()
+    state.B               = B.copy()
 
     return state

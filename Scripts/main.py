@@ -20,7 +20,8 @@ from plots import (
     plot_shadow_price_index, plot_cybernetic_signals,
     plot_real_income_index, plot_labor_productivity,
     plot_growth_targets, plot_excess_demand,
-    plot_inflation,
+    plot_inflation, plot_investment_gdp_ratio, plot_iterations,
+    plot_firm_income_distribution
 )
 
 
@@ -77,10 +78,12 @@ def main():
     state = calibrate(
         data,
         delta=DELTA,
-        drift=config.get("drift", 0.012),
+        drift_slow=config.get("drift_slow", 0.005),
+        drift_fast=config.get("drift_fast", 0.035),
+        kappa_slow=config.get("kappa_slow", 0.05),
+        kappa_fast=config.get("kappa_fast", 0.8),
         neumann_k=config.get("neumann_k", 20),
         kappa_factor=config.get("kappa_factor", 1.0),
-        kappa_ou=config.get("kappa_ou", 0.15),
         L_total=config.get("L_total", 33e9),
         wage_rate=config.get("wage_rate", 16.9),
         labor_mult=config.get("labor_mult", 1.0),
@@ -91,6 +94,7 @@ def main():
         max_iter=config.get("max_iter", 2000),
         g_step=config.get("g_step", 0.0),
         c_step=config.get("c_step", 0.015),
+        nominal_consumption_annual=config.get("nominal_consumption_annual", 807e9),
         slim_history=config.get("slim_history", None),
     )
     if "rng_seed" in config and config["rng_seed"] is not None:
@@ -149,7 +153,7 @@ def main():
     r   = RESULTS_DIR
     P_0 = state.P_0
 
-    plot_gdp(state.history, r / "01_gdp.png")
+    plot_gdp(state.history, r / "01_gdp.png", P_initial=state.pi_0_fixed, A=state.A, real_scale_factor=state.real_scale_factor)
     plot_aggregate_demand_breakdown(state.history, r / "01b_ad_breakdown.png")
     plot_output_consumption(state.history, groups, r / "02_output_consumption.png", P_0=P_0)
     plot_investment(state.history, groups, r / "03_investment.png", P_0=P_0)
@@ -167,6 +171,9 @@ def main():
     plot_growth_targets(state.history, r / "15_growth_targets.png")
     plot_excess_demand(state.history, r / "16_excess_demand.png")
     plot_inflation(state.history, r / "17_inflation.png")
+    plot_investment_gdp_ratio(state.history, r / "18_investment_gdp_ratio.png")
+    plot_iterations(state.history, r / "19_iterations.png")
+    plot_firm_income_distribution(state.history, state.n, r / "20_firm_income.png")
 
     logger.info("\nAll charts and analysis saved to ./Results/")
 

@@ -50,17 +50,37 @@ def savefig(fig, path):
 
 # --- Figures -----------------------------------------------------------------
 
-def plot_gdp(history, save_path):
+def plot_gdp(history, save_path, P_initial=None, A=None, real_scale_factor=None):
     import matplotlib.pyplot as plt
     ts  = np.arange(len(history))
     ql  = qlabels(len(history))
-    # Annualise quarterly GDP/AD by ×4 for display
-    gdp = np.array([h["GDP"]     for h in history]) * 4 / _B_EUR
-    ad  = np.array([h["Real_AD"] for h in history]) * 4 / _B_EUR
+
+    if P_initial is not None and A is not None and real_scale_factor is not None:
+        # Calculate GDP as P_initial * (I - A) * X_actual
+        # Using A (input-output matrix) instead of A_bar (A + delta*B)
+        import scipy.sparse as sp
+        n = P_initial.shape[0]
+        if sp.issparse(A):
+            A_dense = A.toarray()
+        else:
+            A_dense = np.asarray(A)
+
+        gdp_values = []
+        for h in history:
+            X_actual = np.array(h["X_actual"])
+            value_added = (np.eye(n) - A_dense) @ X_actual  # (I - A) * X_actual
+            gdp_q = real_scale_factor * float((P_initial * value_added).sum())
+            gdp_values.append(gdp_q)
+        gdp = np.array(gdp_values) * 4 / _B_EUR  # Annualise
+    else:
+        # Fallback to stored GDP values
+        gdp = np.array([h["GDP"] for h in history]) * 4 / _B_EUR
+
+    ad  = np.array([h.get("Real_AD_realized", h["Real_AD"]) for h in history]) * 4 / _B_EUR
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(ts, gdp, marker="o", label="Real GDP — Value Added (annualised)")
-    ax.plot(ts, ad,  marker="s", linestyle="--", label="Real AD — Final Demand (annualised)")
+    ax.plot(ts, ad,  marker="s", linestyle="--", label="Real AD — Realized Final Demand (annualised)")   
     ax.set_ylabel("Billions EUR (annualised)")
     ax.set_title("Macroeconomic Aggregates")
     _xticks(ax, ts, ql)
@@ -104,7 +124,8 @@ def plot_output_consumption(history, groups, save_path, P_0=None):
         return {g: np.array([(h[key] * prices_to_use)[idx].sum() for h in history])
                 for g, idx in groups.items()}
 
-    X_val_grps = valued_grps("X_star")
+    # Use X_actual (actual firm production) instead of X_star (planner target)
+    X_val_grps = valued_grps("X_actual")
     X_val_tot  = np.array([sum(v[t] for v in X_val_grps.values()) for t in range(T)])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
@@ -116,7 +137,7 @@ def plot_output_consumption(history, groups, save_path, P_0=None):
         bot += sh
     ax1.set_ylim(0, 100)
     ax1.set_ylabel("% of gross output value")
-    ax1.set_title("Gross Output (value shares)")
+    ax1.set_title("Actual Gross Output (value shares)")
     _xticks(ax1, ts, ql)
     ax1.legend()
     ax1.grid()
@@ -128,7 +149,7 @@ def plot_output_consumption(history, groups, save_path, P_0=None):
                          color=GROUP_COLORS[j], label=g)
         bot += C_val_grps[g]
     ax2.set_ylabel("Billions EUR")
-    ax2.set_title("Household Consumption (value, quarterly)")
+    ax2.set_title("Actual Household Consumption (value, quarterly)")
     _xticks(ax2, ts, ql)
     ax2.legend()
     ax2.grid()
@@ -231,7 +252,7 @@ def plot_capital_output_ratio(history, save_path):
     import matplotlib.pyplot as plt
     # Use monetary K and annualised GDP for the ratio
     K = np.array([h["K_val_Q1"] for h in history])
-    Y = np.array([h["GDP"]      for h in history])   # annualise
+    Y = np.array([h["GDP"]      for h in history])*4.0   # annualise
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(K / np.maximum(Y, 1e-30), marker="o")
     ax.set_title("Capital-Output Ratio  K / Y  (Q1 prices, annualised GDP)")
@@ -436,4 +457,137 @@ def plot_inflation(history, save_path):
     _xticks(ax, ts, ql)
     ax.grid(alpha=0.3)
     savefig(fig, save_path)
+
+
+def plot_investment_gdp_ratio(history, save_path, ref_pct: float = 19.8,
+                              start_year: int = 2022):
+    """Investment as % of GDP — quarterly series with annual-average bars.
+
+    Parameters
+    ----------
+    history    : list of quarter dicts (must contain 'I_pct_GDP').
+    save_path  : pathlib.Path for the .png output (.pdf is auto-created).
+    ref_pct    : horizontal reference line (default 22% — Spanish hist. avg).
+    start_year : calendar year of Q1 (default 2022).
+    """
+    import matplotlib.pyplot as plt
+
+    T   = len(history)
+    ts  = np.arange(T)
+    ql  = qlabels(T, start_year=start_year)
+
+    i_pct = np.array([h["I_pct_GDP"] for h in history])
+
+    # Annual-average bars -------------------------------------------------------
+    n_full_years = T // 4
+    bar_xs, bar_hs, bar_lbls = [], [], []
+    for y in range(n_full_years):
+        idxs = np.arange(y * 4, y * 4 + 4)
+        bar_xs.append(float(idxs.mean()))
+        bar_hs.append(float(i_pct[idxs].mean()))
+        bar_lbls.append(str(start_year + y))
+    if T % 4 > 0:                                    # partial final year
+        idxs = np.arange(n_full_years * 4, T)
+        bar_xs.append(float(idxs.mean()))
+        bar_hs.append(float(i_pct[idxs].mean()))
+        bar_lbls.append(f"{start_year + n_full_years}*")
+
+    # 5-year rolling average (on annual grid) -----------------------------------
+    roll5_xs = bar_xs[:]
+    roll5_ys = [float(np.mean(bar_hs[max(0, i - 4): i + 1]))
+                for i in range(len(bar_hs))]
+
+    # Plot ----------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(13, 7))
+
+    ax.bar(bar_xs, bar_hs, width=3.5,
+           color="#3498db", alpha=0.28, zorder=1, label="Annual Average")
+    for bx, bh, bl in zip(bar_xs, bar_hs, bar_lbls):
+        ax.text(bx, bh + 0.15, f"{bh:.1f}%",
+                ha="center", va="bottom", fontsize=8, color="#2980b9")
+
+    ax.plot(ts, i_pct, marker="o", markersize=4, linewidth=2,
+            color="#2c3e50", zorder=3, label="Quarterly I / GDP (%)")
+
+    ax.plot(roll5_xs, roll5_ys, marker="D", markersize=6, linewidth=2.5,
+            linestyle="--", color="#e67e22", zorder=4,
+            label="5-Year Rolling Average")
+
+    ax.axhline(ref_pct, color="#c0392b", linestyle=":", linewidth=1.5,
+               alpha=0.75, label=f"Reference {ref_pct:.0f}% (Spain hist. avg)")
+
+    ax.set_ylabel("Investment / GDP (%)")
+    ax.set_title("Gross Investment as % of Real GDP  —  Quarterly & Annual Averages")
+    _xticks(ax, ts, ql)
+    ax.legend(loc="upper right")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    savefig(fig, save_path)
+
+
+def plot_firm_income_distribution(hist, n, out_path):
+    """Plot the income distribution across the 5 firms for the largest sectors."""
+    import matplotlib.pyplot as plt
+    h_final = hist[-1]
+    v_MIP = h_final.get("v_MIP", np.zeros(n))
+    X_f = h_final.get("X_f", np.zeros((n, 5)))
+    Y_f_mat = v_MIP[:, None] * X_f # (N, 5)
+    
+    # Total income per sector
+    sector_Y = Y_f_mat.sum(axis=1)
+    top_10_idx = np.argsort(sector_Y)[-10:]
+    
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    bottom = np.zeros(10)
+    colors = ["#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22"]
+    
+    for f in range(5):
+        vals = Y_f_mat[top_10_idx, f] / 1e9 # B EUR
+        # Use short names 
+        names = [h_final["sector_short"][i] for i in top_10_idx]
+        ax.bar(names, vals, bottom=bottom, color=colors[f], alpha=0.9, label=f"Firm {f+1}")
+        bottom += vals
+        
+    ax.set_title("Income Distribution Across Firms (Top 10 Sectors)", fontsize=14, fontweight='bold')
+    ax.set_ylabel("Production Income (B EUR nominal)")
+    ax.legend(frameon=False)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    savefig(fig, out_path)
+
+
+def plot_iterations(history, save_path):
+    import matplotlib.pyplot as plt
+    ts  = np.arange(len(history))
+    ql  = qlabels(len(history))
+    iters = np.array([h.get("iterations", 0) for h in history])
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(ts, iters, color="#8e44ad", alpha=0.7)
+    
+    # Add a trend line or rolling average
+    if len(iters) >= 4:
+        # Simple moving average
+        window_size = min(4, len(iters))
+        weights = np.repeat(1.0, window_size) / window_size
+        sma = np.convolve(iters, weights, 'valid')
+        ax.plot(ts[window_size-1:], sma, color="#2980b9", lw=2, label=f"{window_size}-Qtr Moving Average")
+        ax.legend()
+        
+    # Mark maxed out iterations (if using max_iter=2000)
+    max_iter_mask = iters >= 2000
+    if np.any(max_iter_mask):
+        ax.scatter(ts[max_iter_mask], iters[max_iter_mask], color='red', 
+                   s=100, zorder=5, label="Max Iterations Reached")
+        ax.legend()
+
+    ax.set_title("Solver Iterations per Quarter (Convergence Speed)")
+    ax.set_ylabel("Number of Iterations")
+    ax.grid(axis='y', alpha=0.3)
+    _xticks(ax, ts, ql)
+    
+    fig.tight_layout()
+    savefig(fig, save_path)
+
 

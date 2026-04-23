@@ -37,7 +37,7 @@ def _load_core():
     core = jl.ModelCore
 
     # Step 3: verify that the key function landed in the right place
-    expected = ["neumann_apply", "evolve_true_alpha", "revealed_demand",
+    expected = ["evolve_structural_alpha", "revealed_demand",
                 "infer_growth", "compute_investment", "solve_planner",
                 "compute_income", "fast_loop"]
     missing = [f for f in expected if not jl.seval(f"isdefined(ModelCore, :{f})")]
@@ -99,20 +99,19 @@ def _warmup() -> None:
         except Exception as exc:
             logger.warning(f"Julia warmup: {name} failed (continuing): {exc}")
 
-    _try("neumann_apply",      lambda: CORE.neumann_apply(A, v, 3))
-    _try("evolve_true_alpha",  lambda: CORE.evolve_true_alpha(alpha, jl_rng_w, alpha, 0.012, 0.15))
-    _try("revealed_demand",    lambda: CORE.revealed_demand(C_monthly, P_monthly, P_base, C_prev))
+    _try("evolve_structural_alpha",  lambda: CORE.evolve_structural_alpha(alpha, jl_rng_w, alpha, 0.005, 0.05))
+    _try("revealed_demand",    lambda: CORE.revealed_demand(C_monthly, P_monthly, P_base, C_prev, alpha, C_prev))
 
     _try("infer_growth",       lambda: CORE.infer_growth(C_prev, C_prev))
     _try("compute_investment", lambda: CORE.compute_investment(C_prev, A, B_vec, C_prev, C_prev, 0.005, 0.015, k=3))
     _try("solve_planner",      lambda: CORE.solve_planner(
-                                    alpha, A, B_vec, l_vec, l_tilde,
-                                    dK, K, L_total, B_vec,
-                                    C_prev=C_prev, k=3,
+                                    alpha, A, B_vec, l_tilde,
+                                    dK, K, L_total, B_vec, C_prev * 0.35,
+                                    k=3,
                                     tol_p=1e-4, tol_d=1e-4,
                                     eta_K=0.15, eta_L=0.15, max_iter=50))
-    _try("compute_income",     lambda: CORE.compute_income(1.0, 1.0, alpha, C_prev, A))
-    _try("fast_loop",          lambda: CORE.fast_loop(P_base, C_prev, alpha, 1.0, 3))
+    _try("compute_income",     lambda: CORE.compute_income(1.0, C_prev, alpha, A))
+    _try("fast_loop",          lambda: CORE.fast_loop(P_base, C_prev, alpha, alpha, jl_rng_w, 0.035, 0.8, 1.0, C_prev * 0.35, 3))
 
     elapsed = time.perf_counter() - t0
     logger.info(f"Julia warmup complete ({elapsed:.1f}s).")
@@ -122,26 +121,31 @@ _warmup()
 
 # -- Public API ---------------------------------------------------------------
 
-def neumann_apply(A_bar, v, k=20):
-    res = CORE.neumann_apply(_to_dense(A_bar), np.asarray(v, dtype=np.float64), int(k))
-    return np.array(res)
-
-
-def evolve_true_alpha(alpha_true, rng, alpha_bar, drift=0.012, kappa=0.15):
-    at_jl  = np.asarray(alpha_true, dtype=np.float64)
-    ab_jl  = np.asarray(alpha_bar,  dtype=np.float64)
+def evolve_structural_alpha(alpha_slow, rng, alpha_habit,
+                            drift_slow=0.005, kappa_slow=0.05):
+    as_jl  = np.asarray(alpha_slow,  dtype=np.float64)
+    ah_jl  = np.asarray(alpha_habit, dtype=np.float64)
     seed   = int(rng.integers(0, 2**32))
     jl_rng = jl.Random.MersenneTwister(seed)
-    res    = CORE.evolve_true_alpha(at_jl, jl_rng, ab_jl, float(drift), float(kappa))
-    return np.array(res)
+    
+    res_s = CORE.evolve_structural_alpha(
+        as_jl, jl_rng, ah_jl,
+        float(drift_slow), float(kappa_slow)
+    )
+    return np.array(res_s)
 
 
-def revealed_demand(C_monthly, P_monthly, P_base, C_plan):
+def revealed_demand(C_monthly, P_monthly, P_base, C_plan, alpha, gamma):
+    """
+    Infers revealed demand from monthly supply/prices (Equation 16).
+    """
     res = CORE.revealed_demand(
         np.asarray(C_monthly, dtype=np.float64),
         np.asarray(P_monthly, dtype=np.float64),
         np.asarray(P_base,    dtype=np.float64),
         np.asarray(C_plan,    dtype=np.float64),
+        np.asarray(alpha,     dtype=np.float64),
+        np.asarray(gamma,     dtype=np.float64),
     )
     return np.array(res)
 
@@ -154,11 +158,11 @@ def infer_growth(C_hat, C_prev):
     return np.array(res)
 
 
-def compute_investment(G_hat, A_bar, kappa, C_prev, G_vec, g_step, c_step, k=20):
+def compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step, k=20):
     res = CORE.compute_investment(
         np.asarray(G_hat,  dtype=np.float64),
         _to_dense(A_bar),
-        np.asarray(kappa,  dtype=np.float64),
+        _to_dense(B),
         np.asarray(C_prev, dtype=np.float64),
         np.asarray(G_vec,  dtype=np.float64),
         float(g_step),
@@ -168,25 +172,24 @@ def compute_investment(G_hat, A_bar, kappa, C_prev, G_vec, g_step, c_step, k=20)
     return np.array(res)
 
 
-def solve_planner(alpha, A, B, l, l_tilde, dK, K, L_total, G_vec,
+def solve_planner(alpha, A, B, l, l_tilde, dK, K, L_total, G_vec, gamma,
                   C_prev=None, k=20, tol_p=1e-4, tol_d=1e-4,
                   lambda_K_prev=None, lambda_L_prev=None,
                   eta_K=0.15, eta_L=0.15, max_iter=2000):
+    # Note: C_prev, lambda_K_prev, lambda_L_prev are accepted for API
+    # compatibility with simulation.py but NOT forwarded to the Julia
+    # Nesterov solver (v3), which deliberately uses cold-start only.
     a_jl  = np.asarray(alpha,   dtype=np.float64)
     A_jl  = _to_dense(A)
     B_jl  = _to_dense(B)
-    l_jl  = np.asarray(l,       dtype=np.float64)
     lt_jl = np.asarray(l_tilde, dtype=np.float64)
     dk_jl = np.asarray(dK,      dtype=np.float64)
     K_jl  = np.asarray(K,       dtype=np.float64)
-    cp_jl = np.asarray(C_prev,  dtype=np.float64) if C_prev is not None else None
-
-    lam_K_jl = np.asarray(lambda_K_prev, dtype=np.float64) if lambda_K_prev is not None else None
-    lam_L_jl = float(lambda_L_prev) if lambda_L_prev is not None else None
 
     res = CORE.solve_planner(
-        a_jl, A_jl, B_jl, l_jl, lt_jl, dk_jl, K_jl, float(L_total), np.asarray(G_vec, dtype=np.float64),
-        C_prev=cp_jl, lambda_K_prev=lam_K_jl, lambda_L_prev=lam_L_jl,
+        a_jl, A_jl, B_jl, lt_jl, dk_jl, K_jl, float(L_total),
+        np.asarray(G_vec, dtype=np.float64),
+        np.asarray(gamma, dtype=np.float64),
         k=int(k), tol_p=float(tol_p), tol_d=float(tol_d),
         eta_K=float(eta_K), eta_L=float(eta_L), max_iter=int(max_iter),
     )
@@ -203,27 +206,40 @@ def solve_planner(alpha, A, B, l, l_tilde, dK, K, L_total, G_vec,
 
 
 def compute_income(Y_0_init, VAL_0, pi, X_star, A):
+    v = Y_0_init * VAL_0
     res = CORE.compute_income(
-        float(Y_0_init),
-        float(VAL_0),
-        np.asarray(pi,     dtype=np.float64),
+        v,
         np.asarray(X_star, dtype=np.float64),
+        np.asarray(pi,     dtype=np.float64),
         _to_dense(A),
     )
     return float(res)
 
 
-def fast_loop(P_base, C_plan, alpha_true, Y, n_months=3):
+def fast_loop(P_base, C_plan, alpha_fast_start, alpha_slow, rng, drift_fast, kappa_fast, Y, gamma, n_months=3):
+    afs_jl = np.asarray(alpha_fast_start, dtype=np.float64)
+    as_jl  = np.asarray(alpha_slow, dtype=np.float64)
+    seed   = int(rng.integers(0, 2**32))
+    jl_rng = jl.Random.MersenneTwister(seed)
     res = CORE.fast_loop(
         np.asarray(P_base,      dtype=np.float64),
         np.asarray(C_plan,      dtype=np.float64),
-        np.asarray(alpha_true,  dtype=np.float64),
+        afs_jl,
+        as_jl,
+        jl_rng,
+        float(drift_fast),
+        float(kappa_fast),
         float(Y),
+        np.asarray(gamma,       dtype=np.float64),
         int(n_months),
     )
     return dict(
-        C_monthly   = np.array(res.C_monthly),
-        P_monthly   = np.array(res.P_monthly),
-        P_final     = np.array(res.P_final),
-        price_drift = float(res.price_drift),
+        C_monthly          = np.array(res.C_monthly),
+        P_monthly          = np.array(res.P_monthly),
+        P_final            = np.array(res.P_final),
+        price_drift        = float(res.price_drift),
+        signed_price_drift = float(res.signed_drift),
+        monthly_drifts     = np.array(res.monthly_drifts),
+        monthly_resid_Y    = np.array(res.monthly_residual_Y),
+        alpha_true_final   = np.array(res.alpha_true_final),
     )
