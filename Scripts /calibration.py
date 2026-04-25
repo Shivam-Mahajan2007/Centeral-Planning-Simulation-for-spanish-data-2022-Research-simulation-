@@ -183,18 +183,20 @@ class ModelState:
     l_vec:        np.ndarray
     L_total:      float
     delta:        float
-    max_iter:     int             # Maximum dual ascent iterations per quarter
-    drift_slow:   float           # Volatility of structural preference shifts
-    drift_fast:   float           # Volatility of short-term transitory "fads"
-    kappa_slow:   float           # Mean-reversion speed of slow factor to habit
-    kappa_fast:   float           # Mean-reversion speed of fast factor to slow factor
-    wage_rate:    float           # Homogeneous wage rate (EUR/hour)
-    neumann_k:    int             # Number of Neumann iterations
-    primal_tol:   float           # Solver primal tolerance
-    dual_tol:     float           # Solver dual tolerance
-    eta_K:        float           # Dual ascent step size for capital constraint
-    eta_L:        float           # Dual ascent step size for labour constraint
-    inflation_target: float       # Quarterly inflation target (0.01 = 1%)
+    max_iter:     int
+    inflation_target: float
+    pref_drift_rho:   float
+    pref_drift_sigma: float
+    pref_noise_sigma: float
+    theta_drift:      float
+    epsilon:          float
+    wage_rate:    float
+    neumann_k:    int
+    primal_tol:   float
+    dual_tol:     float
+    eta_K:        float
+    eta_L:        float
+    habit_persistence: float
     sector_names: List[str]
     sector_short: List[str]
     # -- dynamics --------------------------------------------------------------
@@ -241,25 +243,27 @@ class ModelState:
 # --- Calibration -------------------------------------------------------------
 
 def calibrate(data: dict,
-              delta:        float = 0.0125,
-              drift_slow:   float = 0.005,
-              drift_fast:   float = 0.035,
-              kappa_slow:   float = 0.05,
-              kappa_fast:   float = 0.8,
-              neumann_k:    int   = 20,
+              delta:        float = 0.015,
+              pref_drift_rho:   float = 0.95,
+              pref_drift_sigma: float = 0.04,
+              pref_noise_sigma: float = 0.01,
+              theta_drift:      float = 0.1,
+              epsilon:          float = 0.5,
+              neumann_k:    int   = 25,
               kappa_factor: float = 1.0,
               L_total:      float = 9.75e9,
-              wage_rate:    float = 11.2,
+              wage_rate:    float = 21.0,
               labor_mult:   float = 1.0,
-              primal_tol:   float = 1e-4,
+              primal_tol:   float = 1e-3,
               dual_tol:     float = 1e-4,
               eta_K:        float = 0.15,
               eta_L:        float = 0.15,
               max_iter:     int   = 2000,
               g_step:       float = 0.0,
-              c_step:       float = 0.015,
+              c_step:       float = 0.01,
               nominal_consumption_annual: float = 807e9,
               inflation_target: float = 0.0,
+              habit_persistence: float = 0.7,
               slim_history: bool  = None) -> ModelState:
     """
     Build and return a fully calibrated ModelState from the IO data dict.
@@ -329,7 +333,7 @@ def calibrate(data: dict,
     # -- B (Capital matrix): diagonal + random off-diagonal ------------------
     diag_kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
                  else _kappa(sector_names)
-    diag_kappa = diag_kappa * 1.3 * kappa_factor
+    diag_kappa = diag_kappa * kappa_factor
     
     # Construct B as sparse: diag(kappa) + random noise
     # Density: ~5%. Range: [0.01, 0.09]
@@ -444,13 +448,15 @@ def calibrate(data: dict,
         l_tilde=l_tilde,
         v_per_unit=v_per_unit,
         l_vec=l_vec, L_total=L_total, delta=delta, 
-        drift_slow=drift_slow, drift_fast=drift_fast,
-        kappa_slow=kappa_slow, kappa_fast=kappa_fast,
+        pref_drift_rho=pref_drift_rho, pref_drift_sigma=pref_drift_sigma,
+        pref_noise_sigma=pref_noise_sigma, theta_drift=theta_drift,
+        epsilon=epsilon,
         wage_rate=wage_rate,
         neumann_k=neumann_k,
         primal_tol=primal_tol, dual_tol=dual_tol,
         eta_K=eta_K, eta_L=eta_L, max_iter=max_iter,
         inflation_target=inflation_target,
+        habit_persistence=habit_persistence,
         sector_names=sector_names, sector_short=sector_short,
         t=0,
         K=K_0.copy(),

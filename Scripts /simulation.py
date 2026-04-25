@@ -53,17 +53,22 @@ def run_quarter(state: ModelState) -> ModelState:
     logger.info(f"\n-- Q{t+1} {'-'*50}")
     
     # 0. True preference drift (unseen by planner - MOVING TARGET OU PROCESS)
-    gamma = getattr(state, "habit_persistence", 0.8) # How slowly the habit adapts
+    gamma = getattr(state, "habit_persistence", 0.7) # DSGE-standard quarterly habit (CEE 2005)
     
     if t == 0:
         state.alpha_habit = state.alpha_bar.copy()
     else:
         # What consumers actually received and valued last quarter
-        expenditures  = state.P_monthly * state.C_monthly
-        period_totals = expenditures.sum(axis=1, keepdims=True)
-        period_totals = np.maximum(period_totals, 1e-30)
-        period_shares = expenditures / period_totals
-        realized_shares = period_shares.mean(axis=0)
+        expenditures     = state.P_monthly * state.C_monthly
+        subsistence_exp  = state.P_monthly * state.gamma
+        discretionary_exp = np.maximum(expenditures - subsistence_exp, 0.0)
+        
+        discretionary_total = discretionary_exp.sum(axis=1, keepdims=True)
+        discretionary_total = np.maximum(discretionary_total, 1e-30)
+        
+        # Marginal budget shares (alpha) derived from discretionary spending
+        realized_shares = (discretionary_exp / discretionary_total).mean(axis=0)
+        realized_shares /= realized_shares.sum()  # Enforce normalization
         
         # Continuously update the habit target (EMA tracking)
         state.alpha_habit = gamma * getattr(state, "alpha_habit", state.alpha_bar) + (1 - gamma) * realized_shares
@@ -77,22 +82,28 @@ def run_quarter(state: ModelState) -> ModelState:
     if t == 0:
         C_hat = state.C.copy()
         G_hat = state.G_hat_init.copy()
+        G_hat_bare = state.G_hat_init.copy()  # Initialize for first quarter
+        state.G_hat_lagged = G_hat_bare.copy()
     else:
-        C_hat = revealed_demand(state.C_monthly, state.P_monthly, state.P, state.C, state.alpha, state.gamma)
-        G_hat_raw = infer_growth(C_hat, state.C)
-        # 2-period Simple Moving Average (SMA) of raw signals
-        G_hat_prev_raw = getattr(state, 'G_hat_raw_prev', G_hat_raw)
-        G_hat = (G_hat_raw + G_hat_prev_raw) / 2.0
-        state.G_hat_raw_prev = G_hat_raw.copy()
+        # Use G_hat_bare computed from previous quarter's tatonnement
+        G_hat_bare = getattr(state, "G_hat_bare_prev", state.G_hat_init)
+        
+        # SMA(2) smoothing: average of previous and two-quarters-ago signals
+        G_hat_prev = getattr(state, "G_hat_lagged", G_hat_bare)
+        G_hat = (G_hat_bare + G_hat_prev) / 2.0
+        
+        # Update lag for next quarter
+        state.G_hat_lagged = G_hat_bare.copy()
         
     logger.info(f"   G_hat  mean={G_hat.mean()*100:.3f}%  max={G_hat.max()*100:.3f}%")
+    logger.info(f"   G_hat_bare (clipped)  mean={G_hat_bare.mean()*100:.3f}%  max={G_hat_bare.max()*100:.3f}%")
 
     # --- Government expenditure (grows at g_step per quarter) ---------------
     state.G = state.G * (1.0 + state.g_step)
     G_vec   = state.G
     logger.info(f"   G_gov = {G_vec.sum()/1e9:.2f} B EUR  (g_step={state.g_step*100:.2f}%)")
 
-    # 3. Investment (Eq. 14)
+    # 3. Investment (Eq. 19) - use smoothed G_hat per Eq. (18), not raw G_hat_bare
     dK = compute_investment(G_hat, state.A_bar, state.B, state.C, G_vec,
                             state.g_step, state.c_step, k=state.neumann_k)
     logger.info(f"   dK = {dK.sum()/1e9:.2f} B EUR")
@@ -121,15 +132,17 @@ def run_quarter(state: ModelState) -> ModelState:
 
     # 4. Planner optimisation
     opt    = solve_planner(state.alpha, state.A_bar, state.B,
-                           state.l_vec, state.l_tilde,
-                           dK, K_eff, L_eff, G_vec, state.gamma,
-                           C_prev=state.C, k=state.neumann_k,
+                           state.l_tilde, dK, K_eff, L_eff, G_vec, state.gamma, state.C,
+                           k=state.neumann_k,
                            tol_p=state.primal_tol, tol_d=state.dual_tol,
-                           lambda_K_prev=getattr(state, "lambda_K", None),
-                           lambda_L_prev=getattr(state, "lambda_L", None),
-                           eta_K=getattr(state, "eta_K", 0.15),
-                           eta_L=getattr(state, "eta_L", 0.15),
-                           max_iter=getattr(state, "max_iter", 2000))
+                           eta_K=state.eta_K, eta_L=state.eta_L,
+                           max_iter=state.max_iter)
+    
+    logger.debug(f"solve_planner keys: {list(opt.keys())}")
+    for k in ["lam_K", "lam_L", "C_star"]:
+        if opt.get(k) is None:
+            logger.error(f"   [CRITICAL] opt['{k}'] is None!")
+    
     C_star = opt["C_star"]
     X_star = opt["X_star"]
     pi     = opt["pi_star"]
@@ -190,8 +203,8 @@ def run_quarter(state: ModelState) -> ModelState:
     # Capital law of motion for each firm
     K_firms_new = (1 - state.delta) * state.K_firms + I_firms
 
-    # Standard aggregate update (must stay consistent with firm layer)
-    K_new = (1 - state.delta) * state.K + I_gross
+    # Aggregate capital is DERIVED from firm layer (accounting identity: K ≡ Σ K_firms)
+    K_new = K_firms_new.sum(axis=0)
 
     if np.isnan(K_new).any():
         raise SimulationError(f"Q{t+1}: K_new contains NaNs")
@@ -204,23 +217,42 @@ def run_quarter(state: ModelState) -> ModelState:
         state.pi_0_fixed    = pi.copy()
         state.dual_weight_0 = pi - state.A.T @ pi
         state.C_0_init      = C_star.copy()
-        state.lambda_K_0    = opt["lambda_K"].copy()
-        state.lambda_L_0    = float(opt["lambda_L"])
-        # real_scale_factor ensure that Nominal == Real at t=0 (Q1)
-        # S = Y0 / sum(pi_1 * C1)
+        
+        # Robust fallback for failures
+        lK = opt.get("lam_K")
+        state.lambda_K_0 = lK.copy() if lK is not None else np.zeros_like(C_star)
+        
+        lL = opt.get("lam_L")
+        state.lambda_L_0 = float(lL) if lL is not None else 0.0
+        
         state.real_scale_factor = state.Y_0_init / max(float(pi @ C_star), 1e-30)
         state.VAL_0_Laspeyres = float((pi * state.C_0_init).sum())
 
     # 7. Nominal Income indexing (LES form) with Firm Layer
-    # Reference resource value weight W1 = (L1*li + K1^T * B) from first quarter
-    W1 = state.lambda_L_0 * state.l_vec + state.lambda_K_0 @ state.B
+    # v_eff = (lambda_L,0 * l + M.T * Lambda_K,0) / [pi_t * (C* + dK_t + G_t)]
+    # where M.T = (I - A).T^-1 @ B.T
     
-    resource_value     = W1 @ X_star
-    shadow_net_product = pi @ (C_star + G_vec + dK)
+    # Numerator part 2: (I - A).T^-1 @ (B.T @ Lambda_K,0)
+    BT_lamK = (state.B.T @ state.lambda_K_0).astype(np.float64)
+    # Ensure dense array for Julia bridge
+    A_dense_T = state.A_bar.T.toarray().astype(np.float64)
+    M_T_lamK = np.asarray(CORE.neumann_apply(A_dense_T, BT_lamK, int(state.neumann_k)))
     
-    # v_MIP: Marginal Income of Production (N,)
-    # Incorporates the nominal scaling factor state.Y_0_init
-    v_MIP = (state.Y_0_init * W1) / max(shadow_net_product, 1e-30)
+    W1 = state.lambda_L_0 * state.l_vec + M_T_lamK
+    
+    # Denominator: pi_t @ (C* + G + dK) (Total Shadow Value)
+    # The user specifies a sectoral objective weighted by total demand value.
+    # We use the scalar dot product for the denominator as is standard for indexing.
+    sector_demand = C_star + G_vec + dK
+    shadow_net_product = float(pi @ sector_demand) 
+    
+    # v_eff: Effective unit value (N,)
+    v_eff = W1 / max(shadow_net_product, 1e-30)
+    
+    resource_value = W1 @ X_star
+    
+    # We use v_eff for the firm allocation LP objective
+    v_MIP = v_eff 
 
     # -- Firm Production Allocation (Linear Programming) ---------------------
     # Convex polytope optimization without Lagrangian duality
@@ -235,6 +267,7 @@ def run_quarter(state: ModelState) -> ModelState:
 
     X_f = np.zeros((state.n, 5))
     B_dense = state.B.toarray()
+    total_cap_all_sectors = np.zeros(state.n)
 
     for j in range(state.n):
         # Per-firm capital caps: max X_f[j,f] s.t. B[:,j] * X_f <= K_firms[f,:]
@@ -246,7 +279,9 @@ def run_quarter(state: ModelState) -> ModelState:
                 cap_caps[f] = np.min(state.K_firms[f, nz_idx] / col_B[nz_idx])
             else:
                 cap_caps[f] = 1e30  # unconstrained sector
-
+        
+        total_cap = cap_caps.sum()
+        total_cap_all_sectors[j] = total_cap
         target = X_star[j]
         if target <= 1e-12:
             X_f[j, :] = 0.0
@@ -254,10 +289,10 @@ def run_quarter(state: ModelState) -> ModelState:
 
         total_cap = cap_caps.sum()
 
-        # Capital-constrained case: total capacity cannot meet target,
-        # so all firms produce flat-out and we scale proportionally.
+        # Capital-constrained case: total capacity cannot meet target.
+        # Fallback: all firms produce at full capacity (no scaling up).
         if total_cap <= target + 1e-10:
-            X_f[j, :] = cap_caps * (target / max(total_cap, 1e-30))
+            X_f[j, :] = cap_caps
             continue
 
         # Linear Programming formulation
@@ -282,25 +317,37 @@ def run_quarter(state: ModelState) -> ModelState:
             X_f[j, :] = cap_caps * (target / max(total_cap, 1e-30))
 
     # Check that sum_f X_f[j,f] = X_star[j] for each sector j
-    X_actual_check = X_f.sum(axis=1)
-    relative_deviations = (X_actual_check - X_star) / np.maximum(X_star, 1e-12)
+    X_actual = X_f.sum(axis=1)
+    relative_deviations = (X_actual - X_star) / np.maximum(X_star, 1e-12)
     max_rel_dev = np.max(np.abs(relative_deviations))
-    if max_rel_dev > 1e-5:  # Only warn if relative deviation is significant (> 0.001%)
-        print(f"WARNING: Firm allocation sum does not match X_star.")
-        print(f"  Max positive relative deviation: {np.max(relative_deviations):.2e}")
-        print(f"  Max negative relative deviation: {np.min(relative_deviations):.2e}")
-        print(f"  Max absolute relative deviation: {max_rel_dev:.2e}")
 
-    # Calculate X_actual: aggregate firm production (what actually gets produced)
-    # This is the ACTUAL output, not the planner's target X_star
-    X_actual = X_f.sum(axis=1)  # (N,) - sum firm outputs within each sector
+    # Check for primal violations (target > capacity)
+    X_star_cap_violation = np.maximum(X_star - total_cap_all_sectors, 0.0)
+    denom_cap = np.maximum(total_cap_all_sectors, 1e-12)
+    max_violation = np.max(X_star_cap_violation / denom_cap)
     
+    if max_violation > state.primal_tol:
+        logger.warning(f"   [WARNING] Planner target exceeds sectoral capacity by {max_violation*100:.2f}%")
+
+    if max_rel_dev > 1e-5:
+        logger.warning(f"   [WARNING] Firm allocation sum does not match X_star (dev: {max_rel_dev:.2e})")
+
     # Compute relative Mean Absolute Deviation between X_actual and X_star
-    mad_relative = np.mean(np.abs((X_actual - X_star) / np.maximum(X_star, 1e-12)))
+    mad_relative = np.mean(np.abs(relative_deviations))
             
-    # Firm Income: Y_f = v_MIP * X_f
-    Y_f_mat = v_MIP[:, None] * X_f # (N, 5)
-    Y = Y_f_mat.sum() # Aggregate nominal income for household
+    # Firm Income: Y_f = v_eff * X_f  (all dynamics at firm level)
+    Y_f_mat = v_eff[:, None] * X_f  # (N, 5)
+    Y_f = Y_f_mat.sum(axis=0)       # (5,) per-firm total income
+
+    # Income scale: calibrated once at Q1 to anchor nominal level
+    if t == 0:
+        state.income_scale = state.Y_0_init / max(float(Y_f.sum()), 1e-30)
+
+    # Y = sum of firm incomes (scaled for nominal calibration)
+    Y = float(Y_f.sum()) * state.income_scale
+
+    # Y_planner: accounting variable — planner's target-based income (for comparison)
+    Y_planner = float(v_eff @ X_star) * state.income_scale
     
     # 8. Prices (LES form): P = (Y * pi) / (1 + pi . gamma)
     P_new = (Y * pi) / (1.0 + np.dot(pi, state.gamma))
@@ -323,24 +370,34 @@ def run_quarter(state: ModelState) -> ModelState:
                 f"X_actual = {(P_new * X_actual).sum()/1e9:.1f} B EUR  "
                 f"(X* target: {(P_new * X_star).sum()/1e9:.1f} B EUR)  "
                 f"{'(OK)' if opt['success'] else '(WARNING)'}  ({opt_iter} iters)")
+    logger.info(f"   Y_firm = {Y/1e9:.2f} B EUR  Y_planner = {Y_planner/1e9:.2f} B EUR  "
+                f"(gap = {abs(Y - Y_planner)/max(Y, 1e-30)*100:.3f}%)")
 
     # 9. Fast tatonnement loop with intra-quarter preference evolution
-    fast = fast_loop(
-        P_new, C_star, state.alpha_true, state.alpha_slow, state.rng, 
-        state.drift_fast, state.kappa_fast, Y, state.gamma
+    fast_res = fast_loop(
+        P_new, C_star, state.alpha_true, state.alpha_slow, state.rng,
+        state.pref_drift_rho, state.pref_drift_sigma, state.pref_noise_sigma,
+        Y, state.gamma, K_eff,
+        theta_drift=state.theta_drift
     )
-    state.alpha_true = fast["alpha_true_final"]
+    state.alpha_true = fast_res["alpha_true_final"]
     
     alpha_gap = float(np.linalg.norm(state.alpha_true - state.alpha))
     alpha_gap_linf = float(np.abs(state.alpha_true - state.alpha).max())
-    logger.info(f"   Y = {Y/1e9:.1f} B EUR  drift = {fast['price_drift']*100:.2f}%")
-    logger.info(f"   alpha_gap = {alpha_gap*100:.2f} pp")
+    logger.info(f"   alpha_true gap: norm={alpha_gap:.4f}  inf={alpha_gap_linf:.4f}")
+
+    # 10. Update simulation state
+    state.P = fast_res["P_final"]
+    state.C = fast_res["C_monthly"].mean(axis=0) * 3
+    state.C_monthly = fast_res["C_monthly"]
+    state.P_monthly = fast_res["P_monthly"]
+    state.price_drift = fast_res["price_drift"]
 
     # 10. Preference update
     # In LES, surplus expenditure P_i(C_i - gamma_i/3) = alpha_i * (Monthly Residual Income).
     # We use gamma/3 for monthly minimum thresholds.
     gamma_m      = state.gamma / 3.0
-    surplus_exp  = fast["P_monthly"] * (fast["C_monthly"] - gamma_m)
+    surplus_exp  = fast_res["P_monthly"] * (fast_res["C_monthly"] - gamma_m)
     net_income   = surplus_exp.sum(axis=1, keepdims=True)
     net_income   = np.maximum(net_income, 1e-30)
     alpha_est    = surplus_exp / net_income
@@ -364,7 +421,7 @@ def run_quarter(state: ModelState) -> ModelState:
     # Gross Output (actual) at Q1 prices
     Gross_Output_Real = state.real_scale_factor * float((X_actual * state.pi_0_fixed).sum())
     C_real = state.real_scale_factor * float((C_star  * state.pi_0_fixed).sum())
-    C_realized = state.real_scale_factor * float((fast["C_monthly"].sum(axis=0) * state.pi_0_fixed).sum())
+    C_realized = state.real_scale_factor * float((fast_res["C_monthly"].sum(axis=0) * state.pi_0_fixed).sum())
     I_gross_real = state.real_scale_factor * float((I_vec   * state.pi_0_fixed).sum())
     I_net_real   = state.real_scale_factor * float((dK      * state.pi_0_fixed).sum())
     G_real = state.real_scale_factor * float((G_vec   * state.pi_0_fixed).sum())
@@ -407,11 +464,13 @@ def run_quarter(state: ModelState) -> ModelState:
     ed_nom_val  = 0.0
     exp_nom_val = 0.0
     for tau in range(3):
-        p_tau     = fast["P_monthly"][tau]
-        c_rev_tau = fast["C_monthly"][tau]
+        p_tau     = fast_res["P_monthly"][tau]
+        c_rev_tau = fast_res["C_monthly"][tau]
         # Change to Demand - Supply (Z = C - Cm)
         ed_nom_val  += float(((c_rev_tau - C_star / 3.0) * p_tau).sum())
         exp_nom_val += float((c_rev_tau * p_tau).sum())
+
+    logger.info(f"   [DIAG] Price drift from planner baseline: mean={fast_res['price_drift']*100:.2f}%  signed={fast_res['signed_drift']*100:.2f}%")
     # -- History record ------------------------------------------------------
     # Investment as % of GDP (annualised ratio; ×4 cancels from numerator & denominator)
     I_pct_GDP = (I_gross_real / max(Real_GDP, 1e-30)) * 100.0
@@ -432,17 +491,15 @@ def run_quarter(state: ModelState) -> ModelState:
             G_max          = float(G_hat.max()),
             alpha_gap      = alpha_gap,
             alpha_gap_linf = alpha_gap_linf,
-            price_drift    = fast["price_drift"],
-            signed_price_drift = fast["signed_price_drift"],
-            monthly_drifts = fast["monthly_drifts"],
-            monthly_resid_Y = fast["monthly_resid_Y"],
+            price_drift    = float(fast_res["price_drift"]),
+            monthly_resid_Y = fast_res["monthly_resid_Y"],
             resource_value = resource_value,
             shadow_net_product = shadow_net_product,
             Y_ratio        = Y_ratio,
-            lambda_K_mean  = float(opt["lambda_K"].mean()) if opt["lambda_K"] is not None else 0.0,
-            lambda_K_max   = float(opt["lambda_K"].max()) if opt["lambda_K"] is not None else 0.0,
-            lambda_L       = float(opt["lambda_L"]) if opt["lambda_L"] is not None else 0.0,
-            C_rev          = fast["C_monthly"].mean(axis=0),
+            lambda_K_mean  = float(opt["lam_K"].mean()) if opt["lam_K"] is not None else 0.0,
+            lambda_K_max   = float(opt["lam_K"].max()) if opt["lam_K"] is not None else 0.0,
+            lambda_L       = float(opt["lam_L"]) if opt["lam_L"] is not None else 0.0,
+            C_rev          = fast_res["C_monthly"].mean(axis=0),
             ED_nom         = ed_nom_val,
             Exp_nom        = exp_nom_val,
             Inflation      = inflation_rate if t > 0 else 0.0,
@@ -464,6 +521,8 @@ def run_quarter(state: ModelState) -> ModelState:
             v_MIP          = v_MIP.copy(),
             X_f            = X_f.copy(),
             MAD_relative   = mad_relative,
+            Y_f            = Y_f.copy(),
+            Y_planner      = Y_planner,
         ))
     else:
         state.history.append(dict(
@@ -482,17 +541,13 @@ def run_quarter(state: ModelState) -> ModelState:
             alpha_true     = state.alpha_true.copy(),
             alpha_gap      = alpha_gap,
             alpha_gap_linf = alpha_gap_linf,
-            price_drift    = fast["price_drift"],
-            signed_price_drift = fast["signed_price_drift"],
-            monthly_drifts = fast["monthly_drifts"],
-            monthly_resid_Y = fast["monthly_resid_Y"],
-            resource_value = resource_value,
+            price_drift    = float(fast_res["price_drift"]),
             shadow_net_product = shadow_net_product,
             Y_ratio        = Y_ratio,
-            lambda_K_mean  = float(opt["lambda_K"].mean()) if opt["lambda_K"] is not None else 0.0,
-            lambda_K_max   = float(opt["lambda_K"].max()) if opt["lambda_K"] is not None else 0.0,
-            lambda_L       = float(opt["lambda_L"]) if opt["lambda_L"] is not None else 0.0,
-            C_rev          = fast["C_monthly"].mean(axis=0),
+            lambda_K_mean  = float(opt["lam_K"].mean()) if opt["lam_K"] is not None else 0.0,
+            lambda_K_max   = float(opt["lam_K"].max()) if opt["lam_K"] is not None else 0.0,
+            lambda_L       = float(opt["lam_L"]) if opt["lam_L"] is not None else 0.0,
+            C_rev          = fast_res["C_monthly"].mean(axis=0),
             ED_nom         = ed_nom_val,
             Exp_nom        = exp_nom_val,
             Inflation      = inflation_rate if t > 0 else 0.0,
@@ -516,12 +571,19 @@ def run_quarter(state: ModelState) -> ModelState:
             v_MIP          = v_MIP.copy(),
             X_f            = X_f.copy(),
             MAD_relative   = mad_relative,
+            Y_f            = Y_f.copy(),
+            Y_planner      = Y_planner,
+            K_firms        = state.K_firms.copy(),
         ))
 
     # -- State update --------------------------------------------------------
     state.t         = t + 1
-    state.K         = K_new
     state.K_firms   = K_firms_new
+    state.K         = K_new  # = K_firms_new.sum(axis=0), accounting identity
+
+    # Verify accounting identity: K ≡ Σ K_firms (within machine precision)
+    assert np.allclose(state.K, state.K_firms.sum(axis=0), rtol=1e-5), \
+        "K ≠ Σ K_firms — accounting identity violated"
     state.alpha     = alpha_new
     state.P         = P_new
     state.C         = C_star
@@ -529,10 +591,11 @@ def run_quarter(state: ModelState) -> ModelState:
     state.X_star    = X_star      # KEEP: planner target for diagnostics
     state.X_f       = X_f.copy()  # KEEP: firm-level outputs
     state.Y         = Y
-    state.C_monthly = fast["C_monthly"]
-    state.P_monthly = fast["P_monthly"]
-    state.lambda_K  = opt["lambda_K"]
-    state.lambda_L  = opt["lambda_L"]
+    state.C_monthly = fast_res["C_monthly"]
+    state.P_monthly = fast_res["P_monthly"]
+    state.G_hat_bare_prev = fast_res["G_hat_bare"]  # Store for next quarter's investment calculation
+    state.lambda_K  = opt["lam_K"]
+    state.lambda_L  = opt["lam_L"]
     return state
 
 

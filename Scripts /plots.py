@@ -55,32 +55,14 @@ def plot_gdp(history, save_path, P_initial=None, A=None, real_scale_factor=None)
     ts  = np.arange(len(history))
     ql  = qlabels(len(history))
 
-    if P_initial is not None and A is not None and real_scale_factor is not None:
-        # Calculate GDP as P_initial * (I - A) * X_actual
-        # Using A (input-output matrix) instead of A_bar (A + delta*B)
-        import scipy.sparse as sp
-        n = P_initial.shape[0]
-        if sp.issparse(A):
-            A_dense = A.toarray()
-        else:
-            A_dense = np.asarray(A)
-
-        gdp_values = []
-        for h in history:
-            X_actual = np.array(h["X_actual"])
-            value_added = (np.eye(n) - A_dense) @ X_actual  # (I - A) * X_actual
-            gdp_q = real_scale_factor * float((P_initial * value_added).sum())
-            gdp_values.append(gdp_q)
-        gdp = np.array(gdp_values) * 4 / _B_EUR  # Annualise
-    else:
-        # Fallback to stored GDP values
-        gdp = np.array([h["GDP"] for h in history]) * 4 / _B_EUR
-
-    ad  = np.array([h.get("Real_AD_realized", h["Real_AD"]) for h in history]) * 4 / _B_EUR
+    # Unified GDP (C + I + G) stored in history
+    gdp = np.array([h["GDP"] for h in history]) * 4 / _B_EUR
+    # Target Aggregate Demand (linked to GDP in simulation.py)
+    ad  = np.array([h["Real_AD"] for h in history]) * 4 / _B_EUR
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(ts, gdp, marker="o", label="Real GDP — Value Added (annualised)")
-    ax.plot(ts, ad,  marker="s", linestyle="--", label="Real AD — Realized Final Demand (annualised)")   
+    ax.plot(ts, gdp, marker="o", label="Real GDP — (C* + dK + G) (annualised)")
+    ax.plot(ts, ad,  marker="s", linestyle="--", label="Real AD — Planned Total (annualised)")   
     ax.set_ylabel("Billions EUR (annualised)")
     ax.set_title("Macroeconomic Aggregates")
     _xticks(ax, ts, ql)
@@ -319,7 +301,12 @@ def plot_shadow_price_index(history, save_path):
     import matplotlib.pyplot as plt
     ts  = np.arange(len(history))
     ql  = qlabels(len(history))
-    cpi = np.array([h.get("CPI", 1.0) for h in history])
+    # Calculate CPI from Inflation: CPI_{t+1} = (1 + i_t) * CPI_t
+    inflation = np.array([h.get("Inflation", 0.0) for h in history])
+    cpi = np.ones(len(history))
+    for i in range(1, len(history)):
+        cpi[i] = cpi[i-1] * (1.0 + inflation[i])
+
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(ts, cpi, marker="o", color="#34495e", linewidth=2)

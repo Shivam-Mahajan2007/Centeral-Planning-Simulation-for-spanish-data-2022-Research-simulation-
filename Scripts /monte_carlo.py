@@ -155,16 +155,22 @@ def main():
     n_runs = 100
     n_q = 20
     config["n_quarters"] = n_q
-    
-    # Trajectory collectors (rows=runs, cols=quarters)
-    # Note: Growth is only calculated from Q2 onwards, so it has n_q-1 columns
+       # Trajectory collectors (rows=runs, cols=quarters)
     traj_iterations = np.zeros((n_runs, n_q))
     traj_inflation  = np.zeros((n_runs, n_q))
     traj_ipct_gdp   = np.zeros((n_runs, n_q))
-    traj_gdp_growth = np.zeros((n_runs, n_q - 1))  # QoQ growth starts from Q2
-    traj_gdp_level  = np.zeros((n_runs, n_q))      # GDP relative to Q1=100
-    traj_cpi        = np.zeros((n_runs, n_q))      # Chained Laspeyres Index
-    traj_mad        = np.zeros((n_runs, n_q))      # Relative Mean Absolute Deviation between X_actual and X_star
+    traj_gdp_growth = np.zeros((n_runs, n_q - 1))
+    traj_gdp_level  = np.zeros((n_runs, n_q))
+    traj_cpi        = np.zeros((n_runs, n_q))
+    traj_mad        = np.zeros((n_runs, n_q))
+    
+    # New metrics
+    traj_alpha_gap   = np.zeros((n_runs, n_q))
+    traj_price_drift = np.zeros((n_runs, n_q))
+    traj_labor_slack = np.zeros((n_runs, n_q))
+    traj_cap_slack   = np.zeros((n_runs, n_q))
+    traj_lambda_K    = np.zeros((n_runs, n_q))
+    traj_lambda_L    = np.zeros((n_runs, n_q))
     
     print(f"Running Monte-Carlo Simulation ({n_runs} runs of {n_q} quarters)...")
     
@@ -176,29 +182,28 @@ def main():
         data = load_data(Path("Data"))
         state = calibrate(
             data,
-            delta=config.get("delta", 0.0125),
-            drift_slow=config.get("drift_slow", 0.005),
-            drift_fast=config.get("drift_fast", 0.035),
-            kappa_slow=config.get("kappa_slow", 0.05),
-            kappa_fast=config.get("kappa_fast", 0.8),
-            neumann_k=config.get("neumann_k", 20),
-            kappa_factor=config.get("kappa_factor", 1.0),
-            L_total=config.get("L_total", 33e9),
-            wage_rate=config.get("wage_rate", 16.9),
-            primal_tol=config.get("primal_tol", 1e-4),
+            delta=config.get("delta", 0.015),
+            pref_drift_rho=config.get("pref_drift_rho", 0.95),
+            pref_drift_sigma=config.get("pref_drift_sigma", 0.01),
+            pref_noise_sigma=config.get("pref_noise_sigma", 0.001),
+            theta_drift=config.get("theta_drift", 0.075),
+            epsilon=config.get("epsilon", 0.5),
+            neumann_k=config.get("neumann_k", 25),
+            kappa_factor=config.get("kappa_factor", 4.0),
+            L_total=config.get("L_total", 39e9),
+            wage_rate=config.get("wage_rate", 21.0),
+            primal_tol=config.get("primal_tol", 1e-3),
             dual_tol=config.get("dual_tol", 1e-4),
             eta_K=config.get("eta_K", 0.15),
             eta_L=config.get("eta_L", 0.15),
             max_iter=config.get("max_iter", 2000),
-            g_step=config.get("g_step", 0.0),
-            c_step=config.get("c_step", 0.015),
+            g_step=config.get("g_step", 0.01),
+            c_step=config.get("c_step", 0.01),
+            habit_persistence=config.get("habit_persistence", 0.7),
             nominal_consumption_annual=config.get("nominal_consumption_annual", 807e9),
             labor_mult=config.get("labor_mult", 1.0),
         )
         state.slim_history = True
-        
-        if "rng_seed" in config and config["rng_seed"] is not None:
-            state.rng = np.random.default_rng(config["rng_seed"])
         
         # Mute logging
         logging.getLogger("simulation").setLevel(logging.ERROR)
@@ -215,80 +220,63 @@ def main():
             traj_inflation[i, q]  = h.get("Inflation", 0.0)
             traj_ipct_gdp[i, q]   = h.get("I_pct_GDP", 0.0)
             traj_gdp_level[i, q]  = (h["GDP"] / gdp_q1) * 100.0
-            traj_cpi[i, q]        = h.get("CPI", 1.0)
+            traj_cpi[i, q]        = traj_cpi[i, q-1] * (1.0 + traj_inflation[i, q]) if q > 0 else 1.0
             traj_mad[i, q]        = h.get("MAD_relative", 0.0)
             
+            # Record new metrics
+            traj_alpha_gap[i, q]   = h.get("alpha_gap", 0.0)
+            traj_price_drift[i, q] = h.get("price_drift", 0.0)
+            traj_labor_slack[i, q] = h.get("labor_slack", 0.0)
+            traj_cap_slack[i, q]   = (h.get("slack_val_Q1", 0.0) / h.get("K_val_Q1", 1.0)) * 100.0
+            traj_lambda_K[i, q]    = h.get("lambda_K_mean", 0.0)
+            traj_lambda_L[i, q]    = h.get("lambda_L", 0.0)
+
             if q > 0:
                 g_now = h["GDP"]
                 g_prev = hist[q-1]["GDP"]
                 traj_gdp_growth[i, q-1] = (g_now / g_prev - 1.0) * 100.0
-
-    # Compute statistics for X_actual vs X_star alignment (Mean Absolute Deviation)
-    mad_samples = traj_mad.flatten()
-    mad_mean = trim_mean(mad_samples, 0.05)
-    mad_std = np.std(mad_samples)
-    mad_median = np.median(mad_samples)
-    mad_p5 = np.percentile(mad_samples, 5)
-    mad_p95 = np.percentile(mad_samples, 95)
-    
-    print("\n--- X_actual vs X_star Alignment (Relative Mean Absolute Deviation) ---")
-    print(f"  Mean:       {mad_mean:.4f}")
-    print(f"  Std Dev:    {mad_std:.4f}")
-    print(f"  Median:     {mad_median:.4f}")
-    print(f"  5th %ile:   {mad_p5:.4f}")
-    print(f"  95th %ile:  {mad_p95:.4f}")
 
     out_dir = Path("Results/MonteCarlo")
     out_dir.mkdir(exist_ok=True, parents=True)
     
     print("\n--- Generating Fan Charts ---")
     
-    plot_fan_chart(
-        traj_gdp_level,
-        "Monte Carlo: Real GDP Trajectory (Q1 = 100)",
-        "Real GDP Index",
-        out_dir / "fan_chart_gdp_level.png",
-        exclude_outliers=True
-    )
-    
-    plot_fan_chart(
-        traj_gdp_growth,
-        "Monte Carlo: Quarter-on-Quarter GDP Growth Rates",
-        "Growth Rate (%)",
-        out_dir / "fan_chart_gdp_growth.png",
-        exclude_outliers=True
-    )
-    
-    plot_fan_chart(
-        traj_cpi,
-        "Monte Carlo: Chained Laspeyres Price Index (CPI)",
-        "Index Level (Q1 = 1.0)",
-        out_dir / "fan_chart_cpi_level.png",
-        exclude_outliers=True
-    )
+    charts = [
+        (traj_gdp_level, "Real GDP Level (Q1=100)", "Index", "gdp_level"),
+        (traj_gdp_growth, "Q-o-Q GDP Growth Rate", "Growth (%)", "gdp_growth"),
+        (traj_inflation * 100, "Quarterly Inflation Rate", "Inflation (%)", "inflation"),
+        (traj_ipct_gdp, "Investment / GDP Ratio", "Share (%)", "investment"),
+        (traj_alpha_gap, "Preference Tracking Error (Alpha Gap)", "L2 Norm", "alpha_gap"),
+        (traj_price_drift * 100, "Planner vs Market Price Drift", "Deviation (%)", "price_drift"),
+        (traj_labor_slack * 100, "Labor Resource Slack", "Unused (%)", "labor_slack"),
+        (traj_cap_slack, "Capital Capacity Slack", "Unused (%)", "capital_slack"),
+        (traj_lambda_K, "Avg Shadow Price of Capital (Lambda K)", "Shadow Value", "lambda_k"),
+        (traj_lambda_L, "Shadow Price of Labor (Lambda L)", "Shadow Value", "lambda_l"),
+    ]
 
-    plot_fan_chart(
-        traj_inflation * 100,
-        "Monte Carlo: Quarterly Inflation (Derivative of CPI)",
-        "Inflation Rate (%)",
-        out_dir / "fan_chart_inflation.png",
-        exclude_outliers=True
-    )
-    
-    plot_fan_chart(
-        traj_ipct_gdp,
-        "Monte Carlo: Investment/GDP Ratio Trajectory",
-        "Gross Investment / GDP (%)",
-        out_dir / "fan_chart_investment.png",
-        exclude_outliers=True
-    )
-    
-    plot_iteration_histogram(
-        traj_iterations,
-        out_dir / "fan_chart_iterations.png"
-    )
+    for data, title, ylabel, fname in charts:
+        plot_fan_chart(data, f"Monte Carlo: {title}", ylabel, out_dir / f"fan_{fname}.png")
+
+    plot_iteration_histogram(traj_iterations, out_dir / "hist_iterations.png")
 
     print("\nMonte-Carlo trajectory analysis complete.")
+    send_notification("Monte-Carlo Complete", f"Finished {n_runs} runs. Plots saved to {out_dir}")
+
+
+def send_notification(title, message):
+    import subprocess
+    try:
+        subprocess.run(["notify-send", title, message], check=True)
+    except Exception:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(title, message)
+            root.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
