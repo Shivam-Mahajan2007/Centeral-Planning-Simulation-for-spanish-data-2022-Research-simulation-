@@ -13,6 +13,7 @@ The simulation models a cybernetic planning system where a central planner optim
 - **Adaptive Dual Ascent Optimisation & Fast Tâtonnement**: A bespoke solver in Julia tackles the material-balancing problem for the macro-planner, featuring Barzilai–Borwein adaptive step sizes, Nesterov momentum, Polyak iterate averaging, and dual variable warm-starting. The fast tâtonnement loop resolves intra-quarter prices iteratively using LES demand functions.
 - **Quarterly Price & Capital Dynamics**: A chained Laspeyres CPI (`CPI_chained`) responds to true demand gaps. Capital depreciates each quarter and investment is apportioned to micro-firms in proportion to their existing capital shares (sector-proportional rule).
 - **Monte-Carlo Simulation**: Natively supports hundreds of stochastic trajectory runs to generate probability density functions, statistical fan charts, and Tail Spread Ratios to validate systemic robustness.
+- **Interactive Research Dashboard**: A React + Vite web dashboard communicates with a FastAPI Python backend to orchestrate single-run and Monte Carlo ensembles. The dashboard features real-time parameter editing, live Server-Sent Events (SSE) telemetry streaming, and a dynamic grid of simulation charts.
 - **Sparse-Matrix Operations**: Leverages fully sparse matrix operations via `scipy.sparse` and Julia native arrays for large-scale throughput.
 
 ---
@@ -20,15 +21,21 @@ The simulation models a cybernetic planning system where a central planner optim
 ## Directory Structure
 
 ```
+App/
+  src/               — React dashboard source code
+  package.json       — Node dependencies
+  vite.config.js     — Vite configuration
+
 Data/
   Spanish_A-matrix.xlsx              — 65×65 technical-coefficient matrix
   Value_added.xlsx                   — Sectoral value added (M EUR/year)
   Consumption_and_total_production.xlsx
-  config.json                        — Runtime parameters
+  config.json                        — Runtime parameters (linked to Dashboard)
 
-Scripts /
-  main.py          — Single baseline run
-  monte_carlo.py   — 100-run stochastic ensemble with fan charts
+Scripts/
+  api.py           — FastAPI backend for the web dashboard (SSE streaming)
+  main.py          — Single baseline run (CLI)
+  monte_carlo.py   — 100-run stochastic ensemble (CLI)
   scenarios.py     — Parametric sweep over delta × drift
   simulation.py    — Quarterly loop orchestration
   calibration.py   — ModelState initialisation and IO calibration
@@ -36,33 +43,52 @@ Scripts /
   model_core.jl    — Julia kernels (solver, tatonnement, Neumann series)
   data_loader.py   — Excel parser with file-mtime cache
   plots.py         — Publication-quality diagnostic charts
-  scaling.py       — Python-side solver and synthetic benchmark
 
 Results/           — Auto-generated per run (timestamped subdirectories)
-  MonteCarlo/      — Fan charts from monte_carlo.py
-  scenarios/       — CSV summary and sensitivity plots
 ```
 
 ---
 
 ## Getting Started
 
-**Prerequisites**: Python 3.8+, Julia 1.10+
+### 1. Prerequisites
+- **Python 3.8+**, **Julia 1.10+** for the simulation core
+- **Node.js 18+** for the React Dashboard
 
 ```bash
-pip install numpy scipy matplotlib pandas juliacall openpyxl
+# Install Python dependencies
+pip install numpy scipy matplotlib pandas juliacall openpyxl fastapi uvicorn sse-starlette
+
+# Install Node dependencies
+cd App && npm install
+```
+*(JuliaCall bootstraps the required Julia packages automatically on first run.)*
+
+### 2. Running the Web Dashboard (Recommended)
+
+Start the FastApi Python backend in Terminal 1:
+```bash
+cd Scripts
+python3 -m uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-JuliaCall bootstraps the required Julia packages automatically on first run.
-
-**Baseline run:**
+Start the React frontend in Terminal 2:
 ```bash
-cd "Scripts "
+cd App
+npm run dev
+```
+Open **[http://localhost:5174](http://localhost:5174)** in your browser. (Click "Run Simulation" or "Start Monte Carlo")
+
+### 3. Running via CLI
+**Baseline single run:**
+```bash
+cd Scripts
 python main.py
 ```
 
 **Monte-Carlo ensemble (100 runs):**
 ```bash
+cd Scripts
 python monte_carlo.py
 ```
 
