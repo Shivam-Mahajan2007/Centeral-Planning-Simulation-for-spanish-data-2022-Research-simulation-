@@ -10,17 +10,8 @@ logger = logging.getLogger(__name__)
 from julia_bridge import CORE, _to_dense
 
 
-# --- Sector capital intensity ------------------------------------------------
-
 def _kappa(sector_names: List[str]) -> np.ndarray:
-    """
-    Return the diagonal of B (capital-coefficient matrix) as a 1-D array.
-
-    kappa[i] = units of capital required per unit of output in sector i.
-    These are annual base values; multiply by kappa_factor (typically 4)
-    to convert to quarterly units.
-    Unrecognised sectors default to kappa = 0.50.
-    """
+    """Return sector capital-intensity coefficients (diagonal of B, annual units)."""
     k = np.ones(len(sector_names)) * 0.50
     for i, name in enumerate(sector_names):
         nm = name.lower()
@@ -44,47 +35,29 @@ def _kappa(sector_names: List[str]) -> np.ndarray:
     return k
 
 
-# --- Value added per unit of output ------------------------------------------
-
 def _v_per_unit(sector_names: List[str]) -> np.ndarray:
-    """
-    Return the value-added content per unit of physical output for each sector.
+    """Return value-added per physical unit of output by sector.
 
-    v_per_unit[i] is interpreted as: EUR of value added generated per one
-    physical unit of sector i's output.  These are theoretically motivated
-    structural parameters -- analogous to kappa -- estimated from typical
-    sectoral value-added shares for a Western European economy.
-
-    X_real is then recovered from observed value-added data V as:
-        X_real = V / v_per_unit
-    which gives physical output in units/quarter.
-
-    Default (unrecognised sectors): 0.40
+    I use these structural parameters (analogous to kappa) to recover physical
+    output X_real from observed value-added V as X_real = V / v_per_unit.
     """
     v = np.ones(len(sector_names)) * 0.60
-
     for i, name in enumerate(sector_names):
         nm = name.lower()
-
-        # Primary sectors -- moderate VA share, significant material inputs
         if any(x in nm for x in ["agricultur", "forestr", "fish"]):
             v[i] = 0.50
-
-        # Capital-intensive extraction & utilities -- low VA share per output unit
         elif any(x in nm for x in ["mining", "quarrying"]):
             v[i] = 0.45
         elif "petroleum" in nm or "coke" in nm:
-            v[i] = 0.25    # very high material throughput, thin VA margin
+            v[i] = 0.25
         elif any(x in nm for x in ["electricity", "gas", "steam"]):
             v[i] = 0.40
         elif any(x in nm for x in ["water supply", "natural water"]):
             v[i] = 0.65
         elif any(x in nm for x in ["sewerage", "waste"]):
             v[i] = 0.70
-
-        # Manufacturing -- broad band depending on processing intensity
         elif any(x in nm for x in ["food", "beverage", "tobacco"]):
-            v[i] = 0.30    # high raw material cost
+            v[i] = 0.30
         elif any(x in nm for x in ["textile", "leather", "apparel"]):
             v[i] = 0.50
         elif any(x in nm for x in ["wood", "paper", "printing"]):
@@ -103,12 +76,8 @@ def _v_per_unit(sector_names: List[str]) -> np.ndarray:
         elif any(x in nm for x in ["furniture", "repair and install",
                                     "mineral"]):
             v[i] = 0.60
-
-        # Construction -- substantial material inputs but meaningful labour VA
         elif "construct" in nm:
             v[i] = 0.65
-
-        # Trade & Transport -- moderate-to-high VA (margins, logistics)
         elif any(x in nm for x in ["wholesale", "retail", "trade"]):
             v[i] = 0.70
         elif any(x in nm for x in ["land transport", "water transport",
@@ -116,15 +85,11 @@ def _v_per_unit(sector_names: List[str]) -> np.ndarray:
             v[i] = 0.65
         elif "accommodation" in nm:
             v[i] = 0.75
-
-        # Finance & Real Estate -- very high VA share
         elif any(x in nm for x in ["financial", "insurance",
                                     "auxiliary to financial"]):
             v[i] = 0.85
         elif any(x in nm for x in ["real estate", "imputed rent"]):
-            v[i] = 0.90    # mostly gross operating surplus, minimal inputs
-
-        # ICT & Business Services -- high human-capital content
+            v[i] = 0.90
         elif any(x in nm for x in ["telecommunication"]):
             v[i] = 0.75
         elif any(x in nm for x in ["computer programming", "publishing",
@@ -138,8 +103,6 @@ def _v_per_unit(sector_names: List[str]) -> np.ndarray:
                                     "travel agency", "security",
                                     "services auxiliary"]):
             v[i] = 0.75
-
-        # Public & Social -- predominantly labour value added
         elif any(x in nm for x in ["public admin", "defence",
                                     "compulsory social"]):
             v[i] = 0.90
@@ -154,31 +117,22 @@ def _v_per_unit(sector_names: List[str]) -> np.ndarray:
                                     "household employ",
                                     "extraterritorial"]):
             v[i] = 0.90
-
     return v
 
 
-# --- Model state -------------------------------------------------------------
-
 @dataclass
 class ModelState:
-    """
-    All large matrices are sparse CSR; B is stored as a 1-D kappa vector.
+    """Complete simulation state passed between quarters.
 
-    Notes on key fields
-    -------------------
-    v_per_unit  – structural value-added per unit of output (EUR/unit).
-                  Used to recover X_real from observed V via X_real = V / v_per_unit.
-                  Also acts as the labour-input proxy in l_vec.
-    K           – capital stock (EUR, at model-consistent units).
-    P_0         – Q1 cost-push prices, stored for capital slack valuation.
+    Capital and all dynamic variables live at the firm level (K_firms).
+    Aggregate K is an accounting identity: K = K_firms.sum(axis=0).
     """
-    # -- static ----------------------------------------------------------------
+    # Static structure
     n:            int
     A:            object          # scipy.sparse.csr_matrix
-    A_bar:        object          # scipy.sparse.csr_matrix  (A + delta*B)
-    B:            object          # scipy.sparse.csr_matrix  (Capital coefficient matrix)
-    l_tilde:      np.ndarray      # (I - A_bar)^(-T) @ l,  precomputed at calibration
+    A_bar:        object          # A + delta*B
+    B:            object          # capital-coefficient matrix
+    l_tilde:      np.ndarray      # (I - A_bar)^{-T} @ l
     v_per_unit:   np.ndarray      # value-added per physical unit (EUR/unit)
     l_vec:        np.ndarray
     L_total:      float
@@ -199,13 +153,13 @@ class ModelState:
     habit_persistence: float
     sector_names: List[str]
     sector_short: List[str]
-    # -- dynamics --------------------------------------------------------------
+    # Dynamic state
     t:            int
-    K:            np.ndarray      # (N,) Total capital stock per good
-    K_firms:      np.ndarray      # (5, N) Capital per firm, per capital type
+    K:            np.ndarray      # (N,) accounting aggregate = K_firms.sum(axis=0)
+    K_firms:      np.ndarray      # (5, N) firm-level capital stocks
     G:            np.ndarray    = field(default_factory=lambda: np.array([]))
-    g_step:       float         = 0.0    # per-quarter growth rate
-    c_step:       float         = 0.015  # per-quarter minimum capacity growth target
+    g_step:       float         = 0.0
+    c_step:       float         = 0.015
     alpha:        np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_true:   np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_slow:   np.ndarray    = field(default_factory=lambda: np.array([]))
@@ -215,11 +169,12 @@ class ModelState:
     C:            np.ndarray    = field(default_factory=lambda: np.array([]))
     X:            np.ndarray    = field(default_factory=lambda: np.array([]))
     Y:            float         = 0.0
+    income_scale: float         = 1.0
     C_monthly:    np.ndarray    = field(default_factory=lambda: np.zeros((3, 1)))
     P_monthly:    np.ndarray    = field(default_factory=lambda: np.zeros((3, 1)))
     rng:          object        = field(default_factory=lambda: np.random.default_rng())
     G_hat_init:   np.ndarray    = field(default_factory=lambda: np.array([]))
-    G_hat_raw_prev: np.ndarray    = field(default_factory=lambda: np.array([]))
+    G_hat_raw_prev: np.ndarray  = field(default_factory=lambda: np.array([]))
     dK_0:         np.ndarray    = field(default_factory=lambda: np.array([]))
     history:      list          = field(default_factory=list)
     slim_history: bool          = False
@@ -234,13 +189,11 @@ class ModelState:
     lambda_K_0:   np.ndarray    = field(default_factory=lambda: np.array([]))
     lambda_L_0:   float         = 0.0
     CPI_chained:  float         = 1.0
-    # Backward-compat alias: expose v_per_unit also as .v for Julia bridge
+
     @property
     def v(self) -> np.ndarray:
         return self.v_per_unit
 
-
-# --- Calibration -------------------------------------------------------------
 
 def calibrate(data: dict,
               delta:        float = 0.015,
@@ -265,36 +218,20 @@ def calibrate(data: dict,
               inflation_target: float = 0.0,
               habit_persistence: float = 0.7,
               slim_history: bool  = None) -> ModelState:
-    """
-    Build and return a fully calibrated ModelState from the IO data dict.
+    """Build a fully calibrated ModelState from the IO data dict.
 
-    All monetary inputs in `data` are expected in EUR/quarter (as produced by
-    data_loader after its M-EUR→EUR and annual→quarterly conversions).
-
-    X_real computation
-    ------------------
-    Physical output X_real is no longer taken directly from the IO table's
-    gross-output column.  Instead it is derived from observed sectoral value
-    added (V) and a structural parameter v_per_unit:
-
-        X_real[i] = V[i] / v_per_unit[i]
-
-    v_per_unit[i] is the EUR of value added embodied in one physical unit of
-    sector i's output -- a sector-specific constant analogous to kappa, set
-    via the _v_per_unit() lookup table.  Value added (V) is thus the only IO
-    variable used to pin down physical production levels; the gross-output
-    column from the IO table is retained only for dead-sector detection.
+    All monetary inputs in `data` are in EUR/quarter (as produced by data_loader).
+    Physical output is derived as X_real = V / v_per_unit rather than taken
+    directly from the IO gross-output column.
     """
     A_in         = data["A"]
-    # V  = sectoral value added, EUR/quarter  (used to derive X_real)
     V            = np.asarray(data["V_total"], dtype=float).copy()
     C_hh         = np.asarray(data["C"],       dtype=float).copy()
-    X_data       = np.asarray(data["X"],       dtype=float).copy()   # IO gross output (EUR/q)
+    X_data       = np.asarray(data["X"],       dtype=float).copy()
     sector_names = list(data["sector_names"])
     sector_short = list(data["sector_short"])
     n            = len(sector_names)
 
-    # -- Convert A to sparse CSR (no-op if already sparse) -------------------
     if sp.issparse(A_in):
         A = A_in.tocsr().astype(float)
     else:
@@ -304,11 +241,7 @@ def calibrate(data: dict,
             logger.info(f"[calibration] Dense A converted to CSR  "
                         f"(sparsity={sparsity*100:.1f}%, nnz={A.nnz:,})")
 
-    # -- Dead sector detection -----------------------------------------------
-    # A sector is dead if both the IO gross-output column and value-added are
-    # essentially zero.  Threshold: 1 M EUR/quarter  (= 4 M EUR/year, a tiny
-    # firm by any measure).
-    _dead_threshold = 1e6   # 1 M EUR/quarter
+    _dead_threshold = 1e6
     dead = np.where((X_data < _dead_threshold) & (V < _dead_threshold))[0]
     if len(dead):
         logger.info(f"[calibration] Zeroing {len(dead)} dead sector(s)")
@@ -319,47 +252,31 @@ def calibrate(data: dict,
         A = A.tocsr()
         A.eliminate_zeros()
 
-    # -- v_per_unit: value-added per physical unit (structural parameter) ----
-    # Analogous to kappa; derived from a sector-name lookup table, NOT from
-    # dividing V by X.  V is only used below to compute X_real.
     v_per_unit = np.asarray(data["v_per_unit"], dtype=float) \
                  if "v_per_unit" in data else _v_per_unit(sector_names)
 
-    # -- X_real: physical output recovered from value-added data -------------
-    # X_real[i] = V[i] / v_per_unit[i]
-    # For dead sectors (V = 0) this naturally yields X_real = 0.
     X_real = V / np.maximum(v_per_unit, 1e-12)
 
-    # -- B (Capital matrix): diagonal + random off-diagonal ------------------
     diag_kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
                  else _kappa(sector_names)
     diag_kappa = diag_kappa * kappa_factor
-    
-    # Construct B as sparse: diag(kappa) + random noise
-    # Density: ~5%. Range: [0.01, 0.09]
+
     B_diag = sp.diags(diag_kappa, format="csr")
-    
-    # Generate off-diagonal noise
     rng_cal = np.random.default_rng(42)
     noise_density = 0.05
     n_noise = int(n * n * noise_density)
     rows = rng_cal.integers(0, n, size=n_noise)
     cols = rng_cal.integers(0, n, size=n_noise)
     vals = rng_cal.uniform(0.05, 0.25, size=n_noise)
-    
     B_noise = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
-    # Combine and ensure diagonal is exactly diag_kappa
-    B = B_diag + B_noise
-    B = B.tolil()
+    B = (B_diag + B_noise).tolil()
     B.setdiag(diag_kappa)
     B = B.tocsr()
     B.eliminate_zeros()
 
-    # -- Eq. 6: A_bar = A + delta * B ----------------------------------------
     A_bar = A + delta * B
     A_bar.eliminate_zeros()
 
-    # Spectral radius check
     try:
         eigvals_top = sp_eigs(A_bar, k=1, which="LM", return_eigenvectors=False,
                               maxiter=10 * n, tol=1e-4)
@@ -371,67 +288,50 @@ def calibrate(data: dict,
     except Exception:
         row_sums = np.asarray(np.abs(A_bar).sum(axis=1)).ravel()
         rho = row_sums.max()
-        if rho < 1:
-            logger.info(f"[calibration] Gershgorin rho(A_bar) <= {rho:.4f}  (stable)")
-        else:
-            logger.warning(f"[calibration] Gershgorin rho(A_bar) <= {rho:.4f}  (check stability!)")
+        level = logger.info if rho < 1 else logger.warning
+        level(f"[calibration] Gershgorin rho(A_bar) <= {rho:.4f}")
 
-    # -- Initial cost-push prices P_real -------------------------------------
+    # Cost-push prices from value-added via Leontief inverse
     P_real = np.asarray(CORE.neumann_apply(_to_dense(A.T), np.asarray(v_per_unit, dtype=np.float64), neumann_k))
 
-    # -- Nominal anchor ------------------------------------------------------
     Y_0 = nominal_consumption_annual / 4.0
 
-    # -- Initial physical demand C_0 and G_0 ---------------------------------
     C_0 = C_hh / np.where(P_real > 1e-30, P_real, 1e-30)
     C_0[dead] = 0
 
     G_raw_cal = np.asarray(data.get("G_raw", np.zeros(n)), dtype=float)
     G_0 = G_raw_cal / np.where(P_real > 1e-30, P_real, 1e-30)
 
-    # -- dK_0 for capital dynamics -------------------------------------------
     g_init = 0.01
     v1 = g_init * C_0 + g_step * G_0
     v2 = (g_init**2) * C_0 + (g_step**2) * G_0
-
     term1 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(v1, dtype=np.float64), neumann_k))
     inner_v2 = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(v2, dtype=np.float64), neumann_k))
     term2 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(B @ inner_v2, dtype=np.float64), neumann_k))
     dK_0 = term1 + term2
 
-    # -- Initial Capital -----------------------------------------------------
+    # K_0 is the calibration anchor; firm capitals are derived from it
     K_0 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k))
 
-    # -- Preferences and base basket -----------------------------------------
     exp = np.where(P_real * C_0 > 0, P_real * C_0, 0.0)
     alpha_0 = exp / max(exp.sum(), 1e-10)
 
-    # Use np.divide to safely handle zeros in C_0 and avoid RuntimeWarnings
     P_0 = np.divide(Y_0 * alpha_0, C_0, out=np.zeros_like(C_0), where=C_0 > 1e-12)
 
     logger.info(f"[calibration] Initial Prices anchored "
                 f"(implied price level: {(P_0.mean() / max(P_real.mean(), 1e-30)):.4f})")
 
-    # -- Labour proxy --------------------------------------------------------
-    l_vec = (v_per_unit.copy() / wage_rate) * labor_mult
+    l_vec   = (v_per_unit.copy() / wage_rate) * labor_mult
     l_tilde = np.asarray(CORE.neumann_apply(_to_dense(A_bar.T), np.asarray(l_vec, dtype=np.float64), neumann_k))
 
-    # -- Initial demand push -------------------------------------------------
     G_hat_init = np.where(C_0 > 0, g_init, 0.0)
 
-    mem_A_MB = (A_bar.data.nbytes + A_bar.indices.nbytes
-                + A_bar.indptr.nbytes) / 1e6
     logger.info(f"[calibration] n={n:,}  nnz(B)={B.nnz:,}  nnz(A_bar)={A_bar.nnz:,}")
     logger.info(f"[calibration] Y0={Y_0/1e9:.1f}B EUR  "
                 f"K0={K_0.sum()/1e9:.1f}B units  "
                 f"C0={C_0.sum()/1e9:.1f}B units/quarter")
-    logger.info(f"[calibration] X_real (from V/v_per_unit): "
-                f"total={X_real.sum()/1e9:.1f}B EUR-equiv units/quarter")
 
-    # -- Firm Layer Initialisation -------------------------------------------
-    # We create 5 firms. Each firm has its own vector of capital goods.
-    # We split the total demand between 5 firms, compute each firm's production,
-    # then determine the capital required for that production.
+    # Split K_0 across 5 firms with near-equal stochastic shares
     B_dense = B.toarray()
     shares = np.abs(np.random.normal(0.20, 0.02, 5))
     shares /= shares.sum()
@@ -442,12 +342,12 @@ def calibrate(data: dict,
         demand_f = demand_total * shares[f]
         X_firm[:, f] = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(demand_f, dtype=np.float64), neumann_k))
         K_firms[f, :] = B_dense @ X_firm[:, f]
-            
+
     state = ModelState(
         n=n, A=A, A_bar=A_bar, B=B,
         l_tilde=l_tilde,
         v_per_unit=v_per_unit,
-        l_vec=l_vec, L_total=L_total, delta=delta, 
+        l_vec=l_vec, L_total=L_total, delta=delta,
         pref_drift_rho=pref_drift_rho, pref_drift_sigma=pref_drift_sigma,
         pref_noise_sigma=pref_noise_sigma, theta_drift=theta_drift,
         epsilon=epsilon,
@@ -475,13 +375,13 @@ def calibrate(data: dict,
         G_hat_raw_prev=G_hat_init.copy(),
         dK_0=dK_0.copy(),
     )
+
     if slim_history is None:
         slim_history = (n > 5000)
         if slim_history:
             logger.info("[calibration] Auto-enabled slim_history for n > 5000")
     state.slim_history = slim_history
 
-    # -- Initial VAL_0 for the income formula --------------------------------
     pi_0 = np.divide(alpha_0, C_0, out=np.zeros_like(alpha_0), where=C_0 > 1e-12)
 
     state.P_0             = P_0.copy()

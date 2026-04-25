@@ -1,28 +1,18 @@
 """
 data_loader.py
 --------------
-Loads and validates the Spanish 2022 IO data from the three Excel files.
+Loads and validates the Spanish 2022 IO data from three Excel source files.
 
-Raw source files are published by INE in *millions of EUR* at *annual* frequency.
+Raw files are published by INE in millions of EUR at annual frequency.
+I apply two unit conversions once here so every downstream module sees clean units:
+  1. Scale by 1e6  → values in EUR
+  2. Divide by 4   → quarterly flows
 
-Unit pipeline (applied here once, so every downstream module sees clean units):
-  Step 1 – Scale:    Multiply all monetary arrays by 1e6  →  values in EUR.
-  Step 2 – Temporal: Divide all flow variables by 4       →  values are quarterly.
+Stocks (capital K) are not divided by 4; only flows are.
+The inverse operation (quarterly → annual) is multiplication by 4.
 
-Stocks (e.g. capital K, computed in calibration from flow data) are NOT
-divided by 4; only flows (output, consumption, investment, government spend,
-value added) are.  The inverse operation — quarterly → annual — is simply
-multiplication by 4, as per standard econometric convention.
-
-Returns clean numpy arrays ready for calibration.
-
-Performance note
-----------------
-The three Excel files are read once and cached as a compressed pickle in
-Data/.data_cache.pkl.  On every subsequent run the cache is validated
-against the source files' modification timestamps -- if none of the files
-have changed, the cache is returned immediately (~5 ms vs ~2 s for xlsx).
-Delete .data_cache.pkl to force a full reload.
+A file-mtime-keyed pickle cache avoids re-parsing xlsx on unchanged runs.
+Delete Data/.data_cache.pkl to force a full reload.
 """
 
 import hashlib
@@ -36,21 +26,16 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "Data"
 
-# Filename map -- tries both underscore and space variants automatically
 _A_NAMES  = ["Spanish_A-matrix.xlsx",  "Spanish A-matrix.xlsx"]
 _V_NAMES  = ["Value_added.xlsx",        "Value added.xlsx"]
 _CP_NAMES = ["Consumption_and_total_production.xlsx",
              "Consumption and total production.xlsx"]
 
-# ---------------------------------------------------------------------- #
-#  Unit conversion constants                                              #
-# ---------------------------------------------------------------------- #
-_M_EUR_TO_EUR      = 1e6   # source files are in millions of EUR
-_ANNUAL_TO_QUARTER = 4     # IO table is annual; model runs quarterly
+_M_EUR_TO_EUR      = 1e6
+_ANNUAL_TO_QUARTER = 4
 
 
 def _find(data_dir: Path, candidates: list) -> Path:
-    """Return the first existing filename from candidates, or raise clearly."""
     for name in candidates:
         p = data_dir / name
         if p.exists():
@@ -62,13 +47,8 @@ def _find(data_dir: Path, candidates: list) -> Path:
 
 
 def _fingerprint(data_dir: Path) -> str:
-    """Return an MD5 of the combined mtimes of all three source files."""
-    paths = [
-        _find(data_dir, _A_NAMES),
-        _find(data_dir, _V_NAMES),
-        _find(data_dir, _CP_NAMES),
-    ]
-    sig = "".join(str(p.stat().st_mtime_ns) for p in paths)
+    paths = [_find(data_dir, n) for n in [_A_NAMES, _V_NAMES, _CP_NAMES]]
+    sig   = "".join(str(p.stat().st_mtime_ns) for p in paths)
     return hashlib.md5(sig.encode()).hexdigest()
 
 
@@ -77,32 +57,16 @@ def _cache_path(data_dir: Path) -> Path:
 
 
 def annual_to_quarterly(arr: np.ndarray) -> np.ndarray:
-    """
-    Convert an annual flow (EUR/year) to a quarterly flow (EUR/quarter).
-    Standard econometric convention: divide by 4.
-    The inverse operation (quarterly → annual) is multiplication by 4.
-    """
     return arr / _ANNUAL_TO_QUARTER
 
 
 def annualise(quarterly_value) -> float:
-    """
-    Convert a quarterly flow to its annualised equivalent.
-    Standard econometric convention: multiply by 4.
-    Works for scalars and numpy arrays.
-    """
     return quarterly_value * _ANNUAL_TO_QUARTER
 
 
 def _load_from_xlsx(data_dir: Path) -> dict:
-    """Parse all three Excel files and return a dict of clean arrays."""
-
-    # ------------------------------------------------------------------ #
-    #  A matrix  (65 x 65 technical coefficients)                         #
-    #  Pure ratios -- no unit conversion needed.                          #
-    # ------------------------------------------------------------------ #
+    # A matrix (65×65 technical coefficients — pure ratios, no unit conversion)
     df_a = pd.read_excel(_find(data_dir, _A_NAMES), index_col=0)
-    # Row 0 of the raw file contains sector-number labels -- skip it
     A_df = df_a.iloc[1:, :]
     sector_names = list(A_df.columns)
     A = A_df.values.astype(float)
@@ -111,74 +75,38 @@ def _load_from_xlsx(data_dir: Path) -> dict:
     assert not np.isnan(A).any(), "NaN values in A matrix"
     assert (A >= 0).all(), "Negative entries in A matrix"
 
-    # ------------------------------------------------------------------ #
-    #  Value added  (1 x 65 row -- total value added per sector)          #
-    #  Raw: annual M EUR  →  Step 1: EUR  →  Step 2: EUR/quarter          #
-    # ------------------------------------------------------------------ #
-    df_v   = pd.read_excel(_find(data_dir, _V_NAMES), header=None)
-    V_raw  = df_v.iloc[0, :].values.astype(float)             # M EUR/year
-    V_total = annual_to_quarterly(V_raw * _M_EUR_TO_EUR)       # EUR/quarter
+    # Value added (1×65, annual M EUR → EUR/quarter)
+    df_v    = pd.read_excel(_find(data_dir, _V_NAMES), header=None)
+    V_total = annual_to_quarterly(df_v.iloc[0, :].values.astype(float) * _M_EUR_TO_EUR)
+    assert len(V_total) == 65
 
-    assert len(V_total) == 65, f"Expected 65 value-added entries, got {len(V_total)}"
+    # Consumption & total production (65×7, annual M EUR → EUR/quarter)
+    df_cp       = pd.read_excel(_find(data_dir, _CP_NAMES), header=None)
+    C_raw       = df_cp.iloc[2:, 0].values.astype(float)
+    I_gross_raw = np.clip(df_cp.iloc[2:, 2].values.astype(float), 0, None)
+    G_raw_raw   = df_cp.iloc[2:, 4].values.astype(float)
+    X_raw       = df_cp.iloc[2:, 6].values.astype(float)
+    assert len(C_raw) == 65 and len(X_raw) == 65
 
-    # ------------------------------------------------------------------ #
-    #  Consumption & total production  (65 sectors x 7 columns)           #
-    #  Raw: annual M EUR  →  Step 1: EUR  →  Step 2: EUR/quarter          #
-    # ------------------------------------------------------------------ #
-    # Row 0: column headers, Row 1: empty, Rows 2-66: sector data
-    # Col 0: household consumption
-    # Col 2: gross capital formation
-    # Col 4: public administration consumption
-    # Col 6: total use (gross output)
-    df_cp   = pd.read_excel(_find(data_dir, _CP_NAMES), header=None)
-
-    C_raw       = df_cp.iloc[2:, 0].values.astype(float)   # M EUR/year
-    I_gross_raw = df_cp.iloc[2:, 2].values.astype(float)   # M EUR/year
-    G_raw_raw   = df_cp.iloc[2:, 4].values.astype(float)   # M EUR/year
-    X_raw       = df_cp.iloc[2:, 6].values.astype(float)   # M EUR/year
-
-    assert len(C_raw) == 65 and len(X_raw) == 65, "C/X length mismatch"
-
-    # Clip negative capital formation to 0 (inventory draw-downs don't
-    # reduce physical capital stock in this model)
-    I_gross_raw = np.clip(I_gross_raw, 0, None)
-
-    # Step 1: M EUR → EUR; Step 2: annual flow → quarterly flow
     C       = annual_to_quarterly(C_raw       * _M_EUR_TO_EUR)
     I_gross = annual_to_quarterly(I_gross_raw * _M_EUR_TO_EUR)
     G_raw   = annual_to_quarterly(G_raw_raw   * _M_EUR_TO_EUR)
     X       = annual_to_quarterly(X_raw       * _M_EUR_TO_EUR)
 
-    # Short sector labels (first 35 chars) for axis ticks
     sector_short = [s[:35].strip() for s in sector_names]
 
-    # Log annualised totals (×4) so numbers match published national accounts
     logger.info(f"[data_loader] Loaded {len(sector_names)} sectors.")
     logger.info(f"  Annualised GDP (sum of VA)  : {annualise(V_total.sum()) / 1e9:,.1f} B EUR")
     logger.info(f"  Annualised gross output     : {annualise(X.sum())        / 1e9:,.1f} B EUR")
     logger.info(f"  Annualised household C      : {annualise(C.sum())        / 1e9:,.1f} B EUR")
-    logger.info(f"  (Quarterly values = annualised / 4)")
 
-    return dict(
-        A=A,
-        V_total=V_total,
-        C=C,
-        I_gross=I_gross,
-        X=X,
-        G_raw=G_raw,
-        sector_names=sector_names,
-        sector_short=sector_short,
-    )
+    return dict(A=A, V_total=V_total, C=C, I_gross=I_gross, X=X, G_raw=G_raw,
+                sector_names=sector_names, sector_short=sector_short)
 
 
 def load_data(data_dir: Path = DATA_DIR) -> dict:
-    """
-    Return parsed IO data, using a file-mtime-keyed cache to skip xlsx
-    parsing on runs where none of the source files have changed.
-    """
+    """Return parsed IO data, using a file-mtime cache to skip xlsx parsing when unchanged."""
     cache = _cache_path(data_dir)
-
-    # Attempt to read and validate the cache
     try:
         fp = _fingerprint(data_dir)
         if cache.exists():
@@ -190,14 +118,10 @@ def load_data(data_dir: Path = DATA_DIR) -> dict:
     except Exception as e:
         logger.warning(f"[data_loader] Cache check failed ({e}), reloading from xlsx.")
 
-    # Cache miss or stale -- parse xlsx
     data = _load_from_xlsx(data_dir)
-
-    # Write cache (silently skip if the Data dir is read-only)
     try:
         with open(cache, "wb") as f:
-            pickle.dump({"fingerprint": fp, "data": data}, f,
-                        protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump({"fingerprint": fp, "data": data}, f, protocol=pickle.HIGHEST_PROTOCOL)
         logger.info(f"[data_loader] Cache written to {cache}.")
     except Exception as e:
         logger.warning(f"[data_loader] Could not write cache: {e}")
@@ -206,10 +130,7 @@ def load_data(data_dir: Path = DATA_DIR) -> dict:
 
 
 def sector_groups(sector_names: list) -> dict:
-    """
-    Classify 65 IO sectors into 8 broad groups for aggregate plotting.
-    Returns a dict mapping group_name -> list of sector indices.
-    """
+    """Classify 65 IO sectors into 8 broad groups for aggregate plotting."""
     groups = {
         "Agriculture & Fishing": [],
         "Mining & Energy":       [],
@@ -252,14 +173,8 @@ def sector_groups(sector_names: list) -> dict:
         else:
             groups["Public & Social Svcs"].append(i)
 
-    # Sanity check
     all_assigned = sum(len(v) for v in groups.values())
     if all_assigned != len(sector_names):
-        unassigned = [i for i in range(len(sector_names))
-                      if not any(i in v for v in groups.values())]
-        logger.warning(
-            f"[sector_groups] Warning: {len(sector_names)-all_assigned} "
-            f"unassigned sectors: {unassigned}"
-        )
+        logger.warning(f"[sector_groups] {len(sector_names)-all_assigned} unassigned sectors")
 
     return groups

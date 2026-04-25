@@ -24,16 +24,12 @@ from plots import (
     plot_firm_income_distribution
 )
 
-
 # --- Config ------------------------------------------------------------------
-
 config = {
     "n_quarters": 20,
     "delta": 0.0125,
     "neumann_k": 20,
     "rng_seed": 42,
-    "drift": 0.012,
-    "kappa_ou": 0.15,
     "kappa_factor": 1.0,
     "L_total": 33e9,
     "wage_rate": 16.9,
@@ -43,7 +39,7 @@ config = {
     "eta_K": 0.15,
     "eta_L": 0.15,
     "max_iter": 2000,
-    "slim_history": None,   # None = auto (True when n > 5000)
+    "slim_history": None,
 }
 
 DATA_DIR    = Path(__file__).parent.parent / "Data"
@@ -52,9 +48,8 @@ CONFIG_PATH = DATA_DIR / "config.json"
 if CONFIG_PATH.exists():
     try:
         with open(CONFIG_PATH, "r") as f:
-            user_config = json.load(f)
-            config.update(user_config)
-            logger.info(f"[main] Loaded config from {CONFIG_PATH}")
+            config.update(json.load(f))
+        logger.info(f"[main] Loaded config from {CONFIG_PATH}")
     except Exception as e:
         logger.warning(f"[main] Failed to load config.json: {e}. Using defaults.")
 
@@ -109,24 +104,19 @@ def main():
         checkpoint_every=config.get("checkpoint_every", 5),
     )
 
-    # -- GDP summary table ---------------------------------------------------
-    # Quarterly GDP is annualised (×4) for display; standard econometric form.
+    # GDP summary table
     logger.info("\nQuarter   GDP (B EUR ann.)  YoY Growth   QoQ Growth")
     logger.info("-" * 55)
     for h in state.history:
         t   = h["t"]
-        gdp = annualise(h["GDP"]) / 1e9          # annualised, B EUR
-        # YoY: compare same quarter of prior year (4 quarters back)
-        yoy = (gdp / (annualise(state.history[t-5]["GDP"])/1e9) - 1) * 100 \
-              if t > 4 else None
-        # QoQ: quarter-on-quarter growth of the quarterly (not annualised) GDP
-        qoq = (h["GDP"] / (state.history[t-2]["GDP"] + 1e-30) - 1) * 100 \
-              if t > 1 else None
-        yoy_str = f"{yoy:6.2f}%" if yoy is not None else "   ---"
-        qoq_str = f"{qoq:6.2f}%" if qoq is not None else "   ---"
-        logger.info(f"Q{t:02d}   {gdp:10.2f}           {yoy_str}       {qoq_str}")
+        gdp = annualise(h["GDP"]) / 1e9
+        yoy = (gdp / (annualise(state.history[t-5]["GDP"])/1e9) - 1) * 100 if t > 4 else None
+        qoq = (h["GDP"] / (state.history[t-2]["GDP"] + 1e-30) - 1) * 100 if t > 1 else None
+        logger.info(f"Q{t:02d}   {gdp:10.2f}  "
+                    f"{'  ---' if yoy is None else f'{yoy:6.2f}%'}  "
+                    f"{'  ---' if qoq is None else f'{qoq:6.2f}%'}")
 
-    # -- Plots ---------------------------------------------------------------
+    # Plots
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

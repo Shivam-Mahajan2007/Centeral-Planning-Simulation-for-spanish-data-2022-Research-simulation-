@@ -19,7 +19,6 @@ DATA_DIR      = Path(__file__).parent.parent / "Data"
 SCENARIOS_DIR = Path(__file__).parent.parent / "Results" / "scenarios"
 SCENARIOS_DIR.mkdir(parents=True, exist_ok=True)
 
-# -- Load config (same logic as main.py) --------------------------------------
 _base_config = {
     "n_quarters": 20,
     "neumann_k": 20,
@@ -49,20 +48,16 @@ N_QUARTERS = _base_config["n_quarters"]
 
 
 def main():
-    data   = load_data(DATA_DIR)
-    groups = sector_groups(data["sector_names"])
-
+    data    = load_data(DATA_DIR)
     summary = []
 
     for delta in DELTAS:
         for drift in DRIFTS:
             logger.info(f"\n{'='*60}\nRunning scenario: delta={delta:.4f}, drift={drift:.4f}\n{'='*60}")
-
             state = calibrate(
-                data, delta=delta, drift=drift,
+                data, delta=delta,
                 neumann_k=_base_config["neumann_k"],
                 kappa_factor=_base_config["kappa_factor"],
-                kappa_ou=_base_config.get("kappa_ou", 0.15),
                 L_total=_base_config["L_total"],
                 wage_rate=_base_config["wage_rate"],
                 labor_mult=_base_config.get("labor_mult", 1.0),
@@ -72,49 +67,37 @@ def main():
                 eta_L=_base_config["eta_L"],
                 max_iter=_base_config["max_iter"],
             )
-            seed = _base_config.get("rng_seed", 42)
-            state.rng = np.random.default_rng(seed)
+            state.rng = np.random.default_rng(_base_config.get("rng_seed", 42))
+            state = run_simulation(state, n_quarters=N_QUARTERS,
+                                   checkpoint_every=_base_config["checkpoint_every"])
 
-            state = run_simulation(
-                state,
-                n_quarters=N_QUARTERS,
-                checkpoint_every=_base_config["checkpoint_every"],
-            )
-
-            # Annualise GDP for reporting (×4)
-            g0 = annualise(state.history[0]["GDP"])
-            gT = annualise(state.history[-1]["GDP"])
+            g0           = annualise(state.history[0]["GDP"])
+            gT           = annualise(state.history[-1]["GDP"])
             total_growth = (gT / g0 - 1) * 100
-
             mean_alpha_err = np.mean([h["alpha_gap"] for h in state.history])
 
             summary.append({
-                "delta":              delta,
-                "drift":              drift,
-                "GDP_initial_B_EUR":  g0 / 1e9,    # annualised B EUR
-                "GDP_final_B_EUR":    gT / 1e9,    # annualised B EUR
-                "Total_Growth_Pct":   total_growth,
-                "Mean_Alpha_Gap":     mean_alpha_err,
+                "delta":             delta,
+                "drift":             drift,
+                "GDP_initial_B_EUR": g0 / 1e9,
+                "GDP_final_B_EUR":   gT / 1e9,
+                "Total_Growth_Pct":  total_growth,
+                "Mean_Alpha_Gap":    mean_alpha_err,
             })
 
-    # Save summary
     df = pd.DataFrame(summary)
     summary_path = SCENARIOS_DIR / "summary.csv"
     df.to_csv(summary_path, index=False)
     logger.info(f"\nSaved overview to {summary_path}")
 
-    # Plot overview
     fig, ax = plt.subplots(figsize=(10, 6))
     for delta in DELTAS:
         sub = df[df["delta"] == delta]
         ax.plot(sub["drift"], sub["Total_Growth_Pct"], marker="o", label=f"delta={delta:.4f}")
-
     ax.set_xlabel("Preference Drift (sigma)")
     ax.set_ylabel("Total GDP Growth over Simulation (%)")
     ax.set_title("Scenario Sensitivity: GDP Growth vs. Preference Drift")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
+    ax.legend(); ax.grid(True, alpha=0.3)
     fig.savefig(SCENARIOS_DIR / "growth_sensitivity.png")
     plt.close(fig)
 
