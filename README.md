@@ -1,6 +1,6 @@
 # Cybernetic In-Kind Planning Simulation — Spain 2022
 
-A computational model of a centrally planned macroeconomic, cybernetic system calibrated on the **2022 Spanish Input-Output tables** (65 sectors, ~€1.25 trillion GDP). The simulation features a hybrid architecture where the planner solves a material-balance optimisation problem each quarter using a computationally robust Adaptive Dual Ascent algorithm in Julia, while modelling deep firm-level microeconomic dynamics in Python.
+A computational model of a centrally planned macroeconomic, cybernetic system calibrated on the **2022 Spanish Input-Output tables** (65 sectors, ~€1.3 trillion GDP). The simulation features a hybrid architecture where the planner solves a material-balance optimisation problem each quarter using a computationally robust Adaptive Dual Ascent algorithm in Julia, while modelling deep firm-level microeconomic dynamics in Python.
 
 ---
 
