@@ -357,13 +357,15 @@ def plot_inflation(history, save_path):
     import matplotlib.pyplot as plt
     ts  = np.arange(len(history))
     ql  = qlabels(len(history))
-    inf = np.array([h.get("Inflation", 0.0) for h in history])
+    inf      = np.array([h.get("Inflation", 0.0) for h in history]) * 100
+    inf_geom = np.array([h.get("Inflation_Geom", 0.0) for h in history]) * 100
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(ts, inf, marker="o", color="#e67e22", linewidth=2.5)
+    ax.plot(ts, inf, marker="o", color="#e67e22", linewidth=2.5, label="Aggregate (Laspeyres)")
+    ax.plot(ts, inf_geom, marker="s", linestyle="--", color="#2980b9", linewidth=2.0, label="Geometric Mean")
     ax.axhline(0, color="black", linestyle="--", alpha=0.5)
     ax.set_ylabel("Quarterly Inflation Rate (%)")
-    ax.set_title("Price Stability: Quarterly Inflation (Laspeyres Index)")
-    _xticks(ax, ts, ql); ax.grid(alpha=0.3)
+    ax.set_title("Price Stability: Aggregate vs. Geometric Inflation")
+    _xticks(ax, ts, ql); ax.legend(); ax.grid(alpha=0.3)
     savefig(fig, save_path)
 
 

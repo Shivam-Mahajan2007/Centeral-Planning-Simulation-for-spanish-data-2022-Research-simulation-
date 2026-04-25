@@ -95,12 +95,13 @@ def main():
     with open("Data/config.json", "r") as f:
         config = json.load(f)
 
-    n_runs = 100
+    n_runs = 20
     n_q    = 20
     config["n_quarters"] = n_q
 
     traj_iterations = np.zeros((n_runs, n_q))
     traj_inflation  = np.zeros((n_runs, n_q))
+    traj_inflation_geom = np.zeros((n_runs, n_q))
     traj_ipct_gdp   = np.zeros((n_runs, n_q))
     traj_gdp_growth = np.zeros((n_runs, n_q - 1))
     traj_gdp_level  = np.zeros((n_runs, n_q))
@@ -156,6 +157,7 @@ def main():
             h = hist[q]
             traj_iterations[i, q]  = h.get("iterations", 0)
             traj_inflation[i, q]   = h.get("Inflation", 0.0)
+            traj_inflation_geom[i, q] = h.get("Inflation_Geom", 0.0)
             traj_ipct_gdp[i, q]    = h.get("I_pct_GDP", 0.0)
             traj_gdp_level[i, q]   = (h["GDP"] / gdp_q1) * 100.0
             traj_cpi[i, q]         = traj_cpi[i, q-1] * (1.0 + traj_inflation[i, q]) if q > 0 else 1.0
@@ -176,7 +178,8 @@ def main():
     charts = [
         (traj_gdp_level,           "Real GDP Level (Q1=100)",              "Index",       "gdp_level"),
         (traj_gdp_growth,          "Q-o-Q GDP Growth Rate",                "Growth (%)",  "gdp_growth"),
-        (traj_inflation * 100,     "Quarterly Inflation Rate",              "Inflation (%)", "inflation"),
+        (traj_inflation * 100,     "Aggregate Inflation Rate (Laspeyres)",  "Inflation (%)", "inflation"),
+        (traj_inflation_geom * 100, "Geometric Mean Inflation Rate",        "Inflation (%)", "inflation_geom"),
         (traj_ipct_gdp,            "Investment / GDP Ratio",                "Share (%)",   "investment"),
         (traj_alpha_gap,           "Preference Tracking Error (Alpha Gap)", "L2 Norm",     "alpha_gap"),
         (traj_price_drift * 100,   "Planner vs Market Price Drift",         "Deviation (%)", "price_drift"),

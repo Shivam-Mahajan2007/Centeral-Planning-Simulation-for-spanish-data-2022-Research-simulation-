@@ -229,6 +229,15 @@ def run_quarter(state: ModelState) -> ModelState:
     inflation_link = np.dot(P_new, state.C) / max(denom_inf, 1e-30)
     inflation_rate = inflation_link - 1.0
 
+    # Geometric mean inflation
+    # P_old might contain zeros in some edge cases (though unlikely for Spanish data calibration)
+    price_relatives = P_new / np.where(state.P > 1e-30, state.P, 1e-30)
+    valid_mask      = (state.P > 1e-6) & (P_new > 1e-6)
+    if valid_mask.any():
+        inflation_rate_geom = np.exp(np.mean(np.log(price_relatives[valid_mask]))) - 1.0
+    else:
+        inflation_rate_geom = 0.0
+
     if t > 0:
         state.CPI_chained *= inflation_link
     else:
@@ -328,6 +337,7 @@ def run_quarter(state: ModelState) -> ModelState:
         Y_planner      = Y_planner,
         Y_f            = Y_f.copy(),
         Inflation      = inflation_rate if t > 0 else 0.0,
+        Inflation_Geom = inflation_rate_geom if t > 0 else 0.0,
         Gross_Output_Real = Gross_Output_Real,
         C_real         = C_real,
         C_realized     = C_realized,
