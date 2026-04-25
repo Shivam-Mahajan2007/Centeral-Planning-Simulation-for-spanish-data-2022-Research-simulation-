@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true, // Listen on all interfaces
-    port: 5173
+    port: 5174
   }
 })
