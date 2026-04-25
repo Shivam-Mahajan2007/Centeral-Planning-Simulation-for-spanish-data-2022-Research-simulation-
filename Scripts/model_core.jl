@@ -12,7 +12,7 @@ export neumann_apply, evolve_structural_alpha, revealed_demand, infer_growth,
 _v(x) = pyconvert(Vector{Float64}, x)
 _m(x) = pyconvert(Matrix{Float64}, x)
 
-# Approximate (I + A + A² + … + Aᵏ) v via repeated multiplication.
+# Approximate (I + A + A^2 + … + A^k) v via repeated multiplication.
 function neumann_apply(A_bar, v, k::Int=20)
     A      = _m(A_bar)
     result = copy(_v(v))
