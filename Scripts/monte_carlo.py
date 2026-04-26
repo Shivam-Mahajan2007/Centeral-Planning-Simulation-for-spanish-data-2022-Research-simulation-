@@ -102,6 +102,7 @@ def main():
     traj_iterations = np.zeros((n_runs, n_q))
     traj_inflation  = np.zeros((n_runs, n_q))
     traj_inflation_geom = np.zeros((n_runs, n_q))
+    traj_overall_geom_inf = np.zeros(n_runs)
     traj_ipct_gdp   = np.zeros((n_runs, n_q))
     traj_gdp_growth = np.zeros((n_runs, n_q - 1))
     traj_gdp_level  = np.zeros((n_runs, n_q))
@@ -171,6 +172,13 @@ def main():
             if q > 0:
                 traj_gdp_growth[i, q-1] = (h["GDP"] / hist[q-1]["GDP"] - 1.0) * 100.0
 
+        inflations = [h.get("Inflation", 0.0) for h in hist[1:]]
+        if inflations:
+            overall_geom_inf = np.exp(np.mean(np.log(1 + np.array(inflations)))) - 1.0
+        else:
+            overall_geom_inf = 0.0
+        traj_overall_geom_inf[i] = overall_geom_inf
+
     out_dir = Path("Results/MonteCarlo")
     out_dir.mkdir(exist_ok=True, parents=True)
     print("\n--- Generating Fan Charts ---")
@@ -192,6 +200,28 @@ def main():
         plot_fan_chart(data, f"Monte Carlo: {title}", ylabel, out_dir / f"fan_{fname}.png")
 
     plot_iteration_histogram(traj_iterations, out_dir / "hist_iterations.png")
+    
+    print("\n--- Terminal Geometric Mean Inflation Statistical Analysis ---")
+    mean_inf = np.mean(traj_overall_geom_inf) * 100
+    median_inf = np.median(traj_overall_geom_inf) * 100
+    p5_inf = np.percentile(traj_overall_geom_inf, 5) * 100
+    p95_inf = np.percentile(traj_overall_geom_inf, 95) * 100
+    std_inf = np.std(traj_overall_geom_inf) * 100
+    print(f"  Mean:   {mean_inf:.3f}% per quarter")
+    print(f"  Median: {median_inf:.3f}% per quarter")
+    print(f"  StdDev: {std_inf:.3f}%")
+    print(f"  5th %:  {p5_inf:.3f}%")
+    print(f"  95th %: {p95_inf:.3f}%")
+    
+    inf_stats_path = out_dir / "geom_inflation_stats.txt"
+    with open(inf_stats_path, "w") as f:
+        f.write("Terminal Time-Series Geometric Mean Inflation Analysis\n")
+        f.write(f"Mean:   {mean_inf:.3f}%\n")
+        f.write(f"Median: {median_inf:.3f}%\n")
+        f.write(f"StdDev: {std_inf:.3f}%\n")
+        f.write(f"5th %:  {p5_inf:.3f}%\n")
+        f.write(f"95th %: {p95_inf:.3f}%\n")
+        
     print("\nMonte-Carlo complete.")
     _send_notification("Monte-Carlo Complete", f"Finished {n_runs} runs. Plots saved to {out_dir}")
 

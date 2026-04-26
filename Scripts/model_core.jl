@@ -87,7 +87,7 @@ function infer_growth(C_hat, C_star)
     res = zeros(length(Chat_v))
     for i in eachindex(Chat_v)
         denom = max(Cstar_v[i], 1e-30)
-        res[i] = max(0.0, (Chat_v[i] - Cstar_v[i]) / denom)
+        res[i] = (Chat_v[i] - Cstar_v[i]) / denom
     end
     return res
 end
@@ -253,8 +253,8 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, ga
         prev_grad_K = copy(grad_K)
         prev_grad_L = grad_L
 
-        step_K = clamp.(eta_K_cur .* grad_K, -LOG_CLAMP, LOG_CLAMP)
-        step_L = clamp(eta_L_cur * grad_L, -LOG_CLAMP, LOG_CLAMP)
+        step_K = eta_K_cur .* grad_K
+        step_L = eta_L_cur * grad_L
 
         prev_dtheta_K = copy(step_K)
         prev_dtheta_L = step_L
@@ -396,7 +396,7 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         # 4. LES price-correction signal for G_hat
         eps_final = min.(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f), -1e-4)
         delta_p  = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
-        signal   = clamp.(eps_final .* delta_p, -0.1, 0.1)
+        signal   = clamp.(eps_final .* delta_p, -0.1, 0.0)
         denom    = 1.0 .+ signal
         C_hat_sum .+= C_m ./ denom
 
@@ -406,7 +406,7 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         monthly_drifts[tau]      = mean(abs.(P_clear ./ P_base_v .- 1.0))
     end
 
-    G_hat_bare = max.(0.0, (C_hat_sum .- C_plan_v) ./ max.(C_plan_v, 1e-30))
+    G_hat_bare = (C_hat_sum .- C_plan_v) ./ max.(C_plan_v, 1e-30)
 
     active_consumer = alpha_s_v .> 1e-12
     P_final      = P_monthly[n_months, :]

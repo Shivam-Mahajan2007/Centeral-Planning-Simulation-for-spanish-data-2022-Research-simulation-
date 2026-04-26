@@ -496,9 +496,19 @@ def run_simulation(state: ModelState, n_quarters: int = 20,
 
     g0 = state.history[0]["GDP"]
     gT = state.history[-1]["GDP"]
+    
+    # Calculate geometric mean of the time-series inflation
+    inflations = [h.get("Inflation", 0.0) for h in state.history[1:]]
+    if inflations:
+        overall_geom_inf = np.exp(np.mean(np.log(1 + np.array(inflations)))) - 1.0
+    else:
+        overall_geom_inf = 0.0
+
     logger.info(f"\n{'#'*60}")
     logger.info(f"  Done.  Annualised GDP: {g0*4/1e9:.1f}B → {gT*4/1e9:.1f}B EUR  "
                 f"({(gT/g0-1)*100:+.1f}% cumulative)")
+    logger.info(f"  Geometric Mean Inflation (Time-Series Avg): {overall_geom_inf*100:.3f}% per quarter")
+    
     if len(step_times) > 1:
         avg_time = sum(step_times[1:]) / (len(step_times) - 1)
         logger.info(f"  Avg time per quarter (excluding Q1 compilation): {avg_time:.2f}s")
