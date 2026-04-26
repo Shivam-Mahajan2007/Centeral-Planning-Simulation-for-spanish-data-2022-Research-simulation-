@@ -60,18 +60,30 @@ def solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=None,
 
     # Cold / warm start
     if C_prev is not None:
-        p_guess = alpha / np.maximum(C_prev, eps_val)
-        rhs     = p_guess - A_bar_T @ p_guess
-        lam_K   = np.maximum(rhs[active] / np.maximum(B[active], eps_val), eps_val)
+        p_guess = alpha_act / np.maximum(C_prev[active] - gamma_act, eps_val)
+        w_guess = np.zeros(n)
+        w_guess[active] = p_guess
+        w_res   = w_guess - A_bar_T @ w_guess
+        lam_K   = np.maximum(w_res[active], eps_val)
     else:
-        lam_K = np.full(n_act, (alpha_act.sum() / n_act) / (Kv.sum() / n_act))
+        lam_K = np.full(n_act, (alpha_act.sum() / n_act) / max((Kv.sum() / n_act), eps_val))
+        lam_K = np.maximum(lam_K, eps_val)
 
     lam_L = (alpha_act.sum() / n_act) / max(L_eff, eps_val)
+    
+    log_lam_K = np.log(lam_K)
+    log_lam_L = np.log(lam_L)
 
-    local_eta_K = np.ones(n_act)
-    prev_s_K    = np.zeros(n_act)
-    local_eta_L = 1.0
-    prev_s_L    = 0.0
+    log_y_K = log_lam_K.copy()
+    log_y_L = log_lam_L
+
+    prev_grad_K   = np.zeros(n_act)
+    prev_grad_L   = 0.0
+    prev_dtheta_K = np.zeros(n_act)
+    prev_dtheta_L = 0.0
+
+    eta_K_cur = eta_K
+    eta_L_cur = eta_L
 
     C_act     = np.zeros(n_act)
     converged = False
@@ -80,8 +92,11 @@ def solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=None,
     for it in range(1, max_iter + 1):
         opt_iter = it
 
+        y_K = np.exp(log_y_K)
+        y_L = np.exp(log_y_L)
+        
         # LES stationarity -> closed-form C = gamma + alpha / pi
-        pi_vec = BtT_act(lam_K) + lam_L * l_act
+        pi_vec = BtT_act(y_K) + y_L * l_act
         C_act  = gamma_act + alpha_act / np.maximum(pi_vec, eps_val)
 
         # Slacks
@@ -91,29 +106,50 @@ def solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=None,
         # KKT check
         primal_ok_K = np.all(s_K / (Kv + eps_val) >= -tol)
         primal_ok_L = (s_L / (abs(L_eff) + eps_val)) >= -tol
-        comp_ok_K   = np.all(np.abs(lam_K * s_K) <= tol)
-        comp_ok_L   = abs(lam_L * s_L) <= tol
+        lam_K_cur = np.exp(log_lam_K)
+        lam_L_cur = np.exp(log_lam_L)
+        comp_ok_K   = np.all(np.abs(lam_K_cur * s_K) <= tol)
+        comp_ok_L   = abs(lam_L_cur * s_L) <= tol
 
         if primal_ok_K and primal_ok_L and comp_ok_K and comp_ok_L:
             converged = True
             break
 
-        # Adaptive step size
+        grad_K = (-s_K) / (Kv + eps_val)
+        grad_L = (-s_L) / (abs(L_eff) + eps_val)
+
+        # Barzilai-Borwein adaptive step
         if it > 1:
-            flip_K          = s_K * prev_s_K < 0
-            local_eta_K     = np.where(flip_K,
-                                       np.maximum(local_eta_K * 0.5, 0.1),
-                                       np.minimum(local_eta_K * 1.1, 5.0))
-            local_eta_L     = (local_eta_L * 0.5 if s_L * prev_s_L < 0
-                               else min(local_eta_L * 1.1, 5.0))
+            dy_K = grad_K - prev_grad_K
+            dot_ss = np.dot(prev_dtheta_K, prev_dtheta_K) + prev_dtheta_L**2
+            dot_sg = np.dot(prev_dtheta_K, dy_K) + prev_dtheta_L * (grad_L - prev_grad_L)
+            if abs(dot_sg) > 1e-30:
+                bb_eta = np.clip(abs(dot_ss / dot_sg), 0.01, 0.5)
+                eta_K_cur = bb_eta
+                eta_L_cur = bb_eta
 
-        prev_s_K = s_K.copy()
-        prev_s_L = s_L
+        prev_grad_K = grad_K.copy()
+        prev_grad_L = grad_L
 
-        exp_K = np.clip(eta_K * local_eta_K * (-s_K) / (Kv + eps_val),        -20, 20)
-        exp_L = np.clip(eta_L * local_eta_L * (-s_L) / (abs(L_eff) + eps_val), -20, 20)
-        lam_K = np.maximum(lam_K * np.exp(exp_K), eps_val)
-        lam_L = max(lam_L * np.exp(exp_L), eps_val)
+        step_K = eta_K_cur * grad_K
+        step_L = eta_L_cur * grad_L
+
+        prev_dtheta_K = step_K.copy()
+        prev_dtheta_L = step_L
+
+        log_lam_K_new = log_y_K + step_K
+        log_lam_L_new = log_y_L + step_L
+
+        # Nesterov momentum update
+        beta_t = (it - 1.0) / (it + 2.0)
+        log_y_K = log_lam_K_new + beta_t * (log_lam_K_new - log_lam_K)
+        log_y_L = log_lam_L_new + beta_t * (log_lam_L_new - log_lam_L)
+
+        log_lam_K = log_lam_K_new.copy()
+        log_lam_L = log_lam_L_new
+        
+    lam_K = np.exp(log_lam_K)
+    lam_L = np.exp(log_lam_L)
 
     # Recovery
     lam_K_full          = np.zeros(n)
@@ -226,4 +262,4 @@ def run_benchmark(n, n_trials=5):
 
 
 if __name__ == "__main__":
-    run_benchmark(10000, n_trials=3)
+    run_benchmark(2000, n_trials=3)
