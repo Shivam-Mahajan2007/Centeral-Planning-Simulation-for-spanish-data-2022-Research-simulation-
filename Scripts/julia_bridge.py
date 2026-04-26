@@ -138,3 +138,12 @@ def compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step, k=25):
         k=int(k),
     )
     return np.array(res)
+
+def solve_firm_lp(v_MIP, B_dense, K_firms, X_star):
+    v_jl = np.asarray(v_MIP, dtype=np.float64)
+    B_jl = _to_dense(B_dense)
+    K_jl = np.asarray(K_firms, dtype=np.float64)
+    X_jl = np.asarray(X_star, dtype=np.float64)
+    
+    res = CORE.solve_firm_lp(v_jl, B_jl, K_jl, X_jl)
+    return np.asarray(res)

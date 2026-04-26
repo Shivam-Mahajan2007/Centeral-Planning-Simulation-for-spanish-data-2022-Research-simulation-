@@ -5,9 +5,11 @@ using SparseArrays
 using Random
 using Statistics
 using PythonCall: pyconvert
+using JuMP
+using HiGHS
 
 export neumann_apply, evolve_structural_alpha, revealed_demand, infer_growth,
-       compute_investment, solve_planner, compute_income, fast_loop
+       compute_investment, solve_planner, compute_income, fast_loop, solve_firm_lp
 
 _v(x) = pyconvert(Vector{Float64}, x)
 _m(x) = pyconvert(Matrix{Float64}, x)
@@ -17,9 +19,11 @@ function neumann_apply(A_bar, v, k::Int=20)
     A      = _m(A_bar)
     result = copy(_v(v))
     term   = copy(result)
+    term_next = similar(result)
     for _ in 1:k
-        term    = A * term
-        result .+= term
+        mul!(term_next, A, term)
+        result .+= term_next
+        term, term_next = term_next, term
     end
     return result
 end
@@ -223,10 +227,14 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, ga
         s_K = Kv    .- Bt_active(C_act)
         s_L = L_eff  - dot(l_tilde_act, C_act)
 
-        primal_ok_K = all(s_K ./ (Kv .+ eps_val) .>= -tol_p)
-        primal_ok_L = (s_L / (abs(L_eff) + eps_val)) >= -tol_p
+        # Primal violations: |slack/constraint| <= tol_p (only for negative slacks)
+        primal_ok_K = all(abs.(min.(0.0, s_K)) ./ (Kv .+ eps_val) .<= tol_p)
+        primal_ok_L = (abs(min(0.0, s_L)) / (abs(L_eff) + eps_val)) <= tol_p
+
+        # Dual complementarity violations: exactly λ^(t) * s <= tol_d
         lam_K_cur   = exp.(log_lam_K)
-        lam_L_cur   = exp(log_lam_L)
+        lam_L_cur   = exp.(log_lam_L)
+        
         comp_ok_K   = all(abs.(lam_K_cur .* s_K) .<= tol_d)
         comp_ok_L   = abs(lam_L_cur * s_L) <= tol_d
 
@@ -430,6 +438,44 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         g_alpha_final    = zeros(n),
         alpha_noise_final = zeros(n),
     )
+end
+# Solves the global linear program for all competitive firms across all sectors simultaneously
+function solve_firm_lp(v_MIP_py, B_dense_py, K_firms_py, X_star_py)
+    v_MIP = _v(v_MIP_py)
+    B_dense = _m(B_dense_py)
+    K_firms = _m(K_firms_py)
+    X_star = _v(X_star_py)
+    
+    n_firms = size(K_firms, 1)
+    n = length(X_star)
+    
+    model = Model(HiGHS.Optimizer)
+    set_silent(model)
+    
+    # X_f[j, f] represents production of sector j by firm f
+    @variable(model, X_f[1:n, 1:n_firms] >= 0)
+    
+    # maximize aggregate income value
+    @objective(model, Max, sum(v_MIP[j] * X_f[j, f] for j in 1:n, f in 1:n_firms))
+    
+    # constraint: overall firm output is bounded by aggregate planner target
+    @constraint(model, [j in 1:n], sum(X_f[j, f] for f in 1:n_firms) <= X_star[j])
+    
+    # constraint: firm specific Leontief generic capital bottlenecks
+    for i in 1:n
+        for f in 1:n_firms
+            # K_f[f, i] > sum_j B_dense[i, j] X_f[j, f]
+            @constraint(model, sum(B_dense[i, j] * X_f[j, f] for j in 1:n if B_dense[i, j] > 1e-12) <= K_firms[f, i])
+        end
+    end
+    
+    optimize!(model)
+    
+    if termination_status(model) == MOI.OPTIMAL
+        return value.(X_f)
+    else
+        return zeros(n, n_firms)
+    end
 end
 
 end  # module ModelCore

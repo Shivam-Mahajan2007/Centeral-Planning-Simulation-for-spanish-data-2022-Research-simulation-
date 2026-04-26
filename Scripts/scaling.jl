@@ -7,16 +7,19 @@ using Printf
 function neumann_apply(A_bar, v, k::Int=20)
     result = copy(v)
     term   = copy(v)
+    term_next = similar(v)
     for _ in 1:k
-        term   = A_bar * term
-        result .+= term
+        mul!(term_next, A_bar, term)
+        result .+= term_next
+        # Swap term and term_next to avoid allocating
+        term, term_next = term_next, term
     end
     return result
 end
 
 # ── Main solver ──────────────────────────────────────────────────────────────
 function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=nothing, C_prev=nothing;
-                       k::Int=20, tol::Float64=1e-4, eta_K::Float64=0.4, eta_L::Float64=0.4, max_iter::Int=2000)
+                       k::Int=20, tol_p::Float64=1e-3, tol_d::Float64=1e-4, eta_K::Float64=0.4, eta_L::Float64=0.4, max_iter::Int=2000)
 
     eps_val = 1e-15
     n = length(alpha)
@@ -99,12 +102,16 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=no
         s_K = Kv .- Bt_act(C_act)
         s_L = L_eff - dot(l_act, C_act)
 
-        primal_ok_K = all(s_K ./ (Kv .+ eps_val) .>= -tol)
-        primal_ok_L = (s_L / (abs(L_eff) + eps_val)) >= -tol
+        # Primal violations: |slack/constraint| <= tol_p (only for negative slacks)
+        primal_ok_K = all(abs.(min.(0.0, s_K)) ./ (Kv .+ eps_val) .<= tol_p)
+        primal_ok_L = (abs(min(0.0, s_L)) / (abs(L_eff) + eps_val)) <= tol_p
+
+        # Dual complementarity violations: exactly \lambda^(t) * s <= tol_d
         lam_K_cur = exp.(log_lam_K)
         lam_L_cur = exp.(log_lam_L)
-        comp_ok_K = all(abs.(lam_K_cur .* s_K) .<= tol)
-        comp_ok_L = abs(lam_L_cur * s_L) <= tol
+        
+        comp_ok_K = all(abs.(lam_K_cur .* s_K) .<= tol_d)
+        comp_ok_L = abs(lam_L_cur * s_L) <= tol_d
 
         if primal_ok_K && primal_ok_L && comp_ok_K && comp_ok_L
             converged = true
@@ -262,5 +269,5 @@ end
 
 # Automatically run if executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
-    run_benchmark(2000, n_trials=3)
+    run_benchmark(10000, n_trials=3)
 end

@@ -8,7 +8,7 @@ from calibration import ModelState
 from julia_bridge import (
     CORE, _to_dense, evolve_structural_alpha, revealed_demand, infer_growth,
     compute_investment, solve_planner, compute_income,
-    fast_loop,
+    fast_loop, solve_firm_lp
 )
 
 logger = logging.getLogger(__name__)
@@ -171,33 +171,21 @@ def run_quarter(state: ModelState) -> ModelState:
     v_MIP      = v_eff
 
     # --- Firm production LP ------------------------------------------------------
-    X_f = np.zeros((state.n, 5))
-    B_dense = state.B.toarray()
-    total_cap_all_sectors = np.zeros(state.n)
+    B_dense = state.B.toarray() if hasattr(state.B, "toarray") else np.asarray(state.B)
+    
+    # Offload the massive generic sparse block-angular constraint LP directly 
+    # to the compiled Julia-side Highs optimizer across all sectors simultaneously
+    X_f = solve_firm_lp(v_MIP, B_dense, state.K_firms, X_star)
 
+    total_cap_all_sectors = np.zeros(state.n)
     for j in range(state.n):
         col_B  = B_dense[:, j]
         nz_idx = col_B > 1e-12
-        cap_caps = np.zeros(5)
-        for f in range(5):
-            cap_caps[f] = (np.min(state.K_firms[f, nz_idx] / col_B[nz_idx])
-                           if nz_idx.any() else 1e30)
-
-        total_cap = cap_caps.sum()
-        total_cap_all_sectors[j] = total_cap
-        target = X_star[j]
-
-        if target <= 1e-12:
-            continue
-        if total_cap <= target + 1e-10:
-            X_f[j, :] = cap_caps
-            continue
-
-        res = linprog(-v_MIP[j] * np.ones(5),
-                      A_eq=np.ones((1, 5)), b_eq=np.array([target]),
-                      bounds=[(0, cap_caps[f]) for f in range(5)],
-                      method='highs')
-        X_f[j, :] = res.x if res.success else cap_caps * (target / max(total_cap, 1e-30))
+        if nz_idx.any():
+            cap_caps = np.min(state.K_firms[:, nz_idx] / col_B[nz_idx], axis=1)
+            total_cap_all_sectors[j] = cap_caps.sum()
+        else:
+            total_cap_all_sectors[j] = 1e30
 
     X_actual          = X_f.sum(axis=1)
     relative_deviations = (X_actual - X_star) / np.maximum(X_star, 1e-12)

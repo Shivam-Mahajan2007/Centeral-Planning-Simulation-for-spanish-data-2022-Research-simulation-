@@ -103,13 +103,16 @@ def solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=None,
         s_K = Kv   - Bt_act(C_act)
         s_L = L_eff - np.dot(l_act, C_act)
 
-        # KKT check
-        primal_ok_K = np.all(s_K / (Kv + eps_val) >= -tol)
-        primal_ok_L = (s_L / (abs(L_eff) + eps_val)) >= -tol
+        # Primal violations: |slack/constraint| <= tol_p (only for negative slacks)
+        primal_ok_K = np.all(np.abs(np.minimum(0.0, s_K)) / (Kv + eps_val) <= tol)
+        primal_ok_L = np.abs(min(0.0, s_L)) / (abs(L_eff) + eps_val) <= tol
+
+        # Dual complementarity violations: exactly \lambda^(t) * s <= tol_d
         lam_K_cur = np.exp(log_lam_K)
         lam_L_cur = np.exp(log_lam_L)
-        comp_ok_K   = np.all(np.abs(lam_K_cur * s_K) <= tol)
-        comp_ok_L   = abs(lam_L_cur * s_L) <= tol
+        
+        comp_ok_K = np.all(np.abs(lam_K_cur * s_K) <= tol)
+        comp_ok_L = abs(lam_L_cur * s_L) <= tol
 
         if primal_ok_K and primal_ok_L and comp_ok_K and comp_ok_L:
             converged = True
@@ -262,4 +265,4 @@ def run_benchmark(n, n_trials=5):
 
 
 if __name__ == "__main__":
-    run_benchmark(2000, n_trials=3)
+    run_benchmark(5000, n_trials=3)
