@@ -102,24 +102,26 @@ function compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step; k::I
     C_prev_v = _v(C_prev)
     G_vec_v  = _v(G_vec)
     g        = Float64(g_step)
-
     is_B_1d = B isa AbstractArray ? ndims(B) == 1 : pyconvert(Int, B.ndim) == 1
     B_m = is_B_1d ? nothing : _m(B)
     B_v = is_B_1d ? _v(B)   : nothing
     A_m = _m(A_bar)
-
     B_apply = v -> is_B_1d ? B_v .* v : B_m * v
-
     gC      = max.(G_hat_v, 0)
+
+    # --- C_prev terms ---
     Gv      = gC .* C_prev_v
     term1_C = B_apply(neumann_apply(A_m, Gv, k))
     term2_C = B_apply(neumann_apply(A_m, gC .* term1_C, k))
+    term3_C = B_apply(neumann_apply(A_m, gC .* term2_C, k))
 
+    # --- G_vec terms ---
     G_v_g   = g .* G_vec_v
     term1_G = B_apply(neumann_apply(A_m, G_v_g, k))
     term2_G = B_apply(neumann_apply(A_m, g .* term1_G, k))
+    term3_G = B_apply(neumann_apply(A_m, g .* term2_G, k))
 
-    return term1_C .+ term2_C .+ term1_G .+ term2_G
+    return term1_C .+ term2_C .+ term3_C .+ term1_G .+ term2_G .+ term3_G
 end
 
 # Nesterov dual ascent with Barzilai-Borwein step size and Polyak averaging.
