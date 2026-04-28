@@ -69,7 +69,11 @@ def solve_planner(alpha, A, B, l_tilde, dK, K, L_total, G_vec, gamma, C_prev,
 
 def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
               drift_rho, drift_sigma, noise_sigma, Y, gamma, K_v,
-              theta_drift=0.1):
+              theta_drift=0.1,
+              alpha_h=None, gamma_h=None, Y_h=None,
+              alpha_slow_h=None,
+              price_tol=0.005,
+              max_price_iter=25):
     pb_jl = np.asarray(P_base,    dtype=np.float64)
     cp_jl = np.asarray(C_plan,    dtype=np.float64)
     at_jl = np.asarray(alpha_true, dtype=np.float64)
@@ -80,11 +84,23 @@ def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
     seed   = int(rng.integers(0, 2**32))
     jl_rng = jl.Random.MersenneTwister(seed)
 
+    # Build optional household kwargs
+    hh_kwargs = {}
+    if alpha_h is not None and gamma_h is not None and Y_h is not None:
+        hh_kwargs["alpha_h"] = np.asarray(alpha_h, dtype=np.float64)
+        hh_kwargs["gamma_h"] = np.asarray(gamma_h, dtype=np.float64)
+        hh_kwargs["Y_h"]     = np.asarray(Y_h,     dtype=np.float64)
+    if alpha_slow_h is not None:
+        hh_kwargs["alpha_slow_h"] = np.asarray(alpha_slow_h, dtype=np.float64)
+
     res = CORE.fast_loop(
         pb_jl, cp_jl, at_jl, as_jl, jl_rng,
         float(drift_rho), float(drift_sigma), float(noise_sigma),
         float(Y), ga_jl, kv_jl, 3,
-        theta_drift=float(theta_drift)
+        theta_drift=float(theta_drift),
+        price_tol=float(price_tol),
+        max_price_iter=int(max_price_iter),
+        **hh_kwargs
     )
     return {
         "C_monthly":        np.asarray(res.C_monthly),
@@ -97,6 +113,7 @@ def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
         "alpha_true_final": np.asarray(res.alpha_true_final),
         "C_hat":            np.asarray(res.C_hat),
         "G_hat_bare":       np.asarray(res.G_hat_bare),
+        "alpha_h_final":    np.asarray(res.alpha_h_final),
     }
 
 def compute_income(v, X_star, pi, A):
@@ -139,11 +156,11 @@ def compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step, k=25):
     )
     return np.array(res)
 
-def solve_firm_lp(v_MIP, B_dense, K_firms, X_star):
+def solve_firm_lp(v_MIP, B_dense, K_firms, X_star, tol=0.001):
     v_jl = np.asarray(v_MIP, dtype=np.float64)
     B_jl = _to_dense(B_dense)
     K_jl = np.asarray(K_firms, dtype=np.float64)
     X_jl = np.asarray(X_star, dtype=np.float64)
     
-    res = CORE.solve_firm_lp(v_jl, B_jl, K_jl, X_jl)
+    res = CORE.solve_firm_lp(v_jl, B_jl, K_jl, X_jl, float(tol))
     return np.asarray(res)

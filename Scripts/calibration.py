@@ -143,6 +143,8 @@ class ModelState:
     pref_drift_sigma: float
     pref_noise_sigma: float
     theta_drift:      float
+    price_tol:        float
+    max_price_iter:   int
     epsilon:          float
     wage_rate:    float
     neumann_k:    int
@@ -189,6 +191,15 @@ class ModelState:
     lambda_K_0:   np.ndarray    = field(default_factory=lambda: np.array([]))
     lambda_L_0:   float         = 0.0
     CPI_chained:  float         = 1.0
+    # Multi-household demand side
+    n_households: int            = 4
+    W_ownership:  np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_firms)
+    alpha_h:      np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
+    alpha_true_h: np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
+    gamma_h:      np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
+    alpha_slow_h: np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
+    alpha_habit_h: np.ndarray   = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
+    n_firms:      int            = 5
 
     @property
     def v(self) -> np.ndarray:
@@ -217,7 +228,12 @@ def calibrate(data: dict,
               nominal_consumption_annual: float = 807e9,
               inflation_target: float = 0.0,
               habit_persistence: float = 0.7,
-              slim_history: bool  = None) -> ModelState:
+              slim_history: bool  = None,
+              n_households: int   = 4,
+              hh_dispersion: float = 0.05,
+              price_tol: float = 0.005,
+              max_price_iter: int = 25,
+              n_firms: int = 5) -> ModelState:
     """Build a fully calibrated ModelState from the IO data dict.
 
     All monetary inputs in `data` are in EUR/quarter (as produced by data_loader).
@@ -302,7 +318,7 @@ def calibrate(data: dict,
     G_raw_cal = np.asarray(data.get("G_raw", np.zeros(n)), dtype=float)
     G_0 = G_raw_cal / np.where(P_real > 1e-30, P_real, 1e-30)
 
-    g_init = 0.01
+    g_init = 0.0075
     v1 = g_init * C_0 + g_step * G_0
     v2 = (g_init**2) * C_0 + (g_step**2) * G_0
     term1 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(v1, dtype=np.float64), neumann_k))
@@ -310,8 +326,8 @@ def calibrate(data: dict,
     term2 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(B @ inner_v2, dtype=np.float64), neumann_k))
     dK_0 = term1 + term2
 
-    # K_0 is the calibration anchor; firm capitals are derived from it
-    K_0 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k))
+    # K_0 is the calibration anchor; firm capitals are derived from it with a 0.5% slack buffer
+    K_0 = 1.0025 * (B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k)))
 
     exp = np.where(P_real * C_0 > 0, P_real * C_0, 0.0)
     alpha_0 = exp / max(exp.sum(), 1e-10)
@@ -331,17 +347,26 @@ def calibrate(data: dict,
                 f"K0={K_0.sum()/1e9:.1f}B units  "
                 f"C0={C_0.sum()/1e9:.1f}B units/quarter")
 
-    # Split K_0 across 5 firms with near-equal stochastic shares
+    # Split K_0 across firms with near-equal stochastic shares
     B_dense = B.toarray()
-    shares = np.abs(np.random.normal(0.20, 0.02, 5))
+    shares = np.abs(np.random.normal(1.0/n_firms, 0.02, n_firms))
     shares /= shares.sum()
+    # Split K_0 across firms using partitioned final demand
     demand_total = C_0 + G_0 + dK_0
-    X_firm = np.zeros((n, 5))
-    K_firms = np.zeros((5, n))
-    for f in range(5):
-        demand_f = demand_total * shares[f]
-        X_firm[:, f] = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(demand_f, dtype=np.float64), neumann_k))
-        K_firms[f, :] = B_dense @ X_firm[:, f]
+    X_firm = np.zeros((n, n_firms))
+    K_firms = np.zeros((n_firms, n))
+    B_dense = B.toarray() if hasattr(B, "toarray") else B
+    
+    for f in range(n_firms):
+        # F_firm: Target final demand for this specific firm
+        F_firm = shares[f] * demand_total
+        
+        # Invert the input-output relations to get the required gross output
+        X_f_req = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(F_firm, dtype=np.float64), neumann_k))
+        
+        # Derive the capital stock needed to support that specific output bundle, including 0.25% slack
+        K_firms[f, :] = 1.0025 * (B_dense @ X_f_req)
+        X_firm[:, f] = X_f_req
 
     state = ModelState(
         n=n, A=A, A_bar=A_bar, B=B,
@@ -350,6 +375,7 @@ def calibrate(data: dict,
         l_vec=l_vec, L_total=L_total, delta=delta,
         pref_drift_rho=pref_drift_rho, pref_drift_sigma=pref_drift_sigma,
         pref_noise_sigma=pref_noise_sigma, theta_drift=theta_drift,
+        price_tol=price_tol, max_price_iter=max_price_iter,
         epsilon=epsilon,
         wage_rate=wage_rate,
         neumann_k=neumann_k,
@@ -357,6 +383,7 @@ def calibrate(data: dict,
         eta_K=eta_K, eta_L=eta_L, max_iter=max_iter,
         inflation_target=inflation_target,
         habit_persistence=habit_persistence,
+        n_firms=n_firms,
         sector_names=sector_names, sector_short=sector_short,
         t=0,
         K=K_0.copy(),
@@ -386,11 +413,49 @@ def calibrate(data: dict,
 
     state.P_0             = P_0.copy()
     state.C_0_init        = C_0.copy()
-    state.gamma           = 0.20 * C_0.copy()
+    state.gamma           = np.zeros_like(C_0)        # gamma=0 diagnostic test
     state.VAL_0_Laspeyres = 1.0
     state.pi_0_fixed      = np.array([])
     state.dual_weight_0   = np.array([])
     state.Y_0_init        = float(Y_0)
     state.B               = B.copy()
+
+    # --- Multi-household initialization ------------------------------------------
+    state.n_households = n_households
+    state.n_firms = n_firms
+
+    # Ownership matrix W: (n_households, n_firms)
+    # Columns sum to 1: each column is the distribution of one firm's income
+    rng_hh = np.random.default_rng(123)
+    # dirichlet(size=n_firms) gives (n_firms, n_households) where rows sum to 1
+    # Transposing gives (n_households, n_firms) where COLUMNS sum to 1
+    state.W_ownership = rng_hh.dirichlet(np.ones(n_households), size=n_firms).T
+
+    # Per-household subsistence: gamma_h = gamma / n_households
+    state.gamma_h = np.tile(state.gamma / n_households, (n_households, 1))  # (4, N)
+
+    # Per-household preferences: initialise with log-normal dispersion around
+    # aggregate alpha_0.  σ = 0.15 gives meaningful heterogeneity for the
+    # LN-AR drift to amplify over time.
+    alpha_h = np.zeros((n_households, n))
+    for h in range(n_households):
+        noise = rng_hh.normal(0.0, hh_dispersion, n)
+        a_h = alpha_0 * np.exp(noise)
+        a_h = np.maximum(a_h, 1e-30)
+        a_h /= a_h.sum()
+        alpha_h[h, :] = a_h
+    state.alpha_h = alpha_h
+    state.alpha_true_h = alpha_h.copy()
+    state.alpha_slow_h = alpha_h.copy()
+    state.alpha_habit_h = alpha_h.copy()
+    state.price_tol = price_tol
+    state.max_price_iter = max_price_iter
+
+    # Sync planner's starting belief with the actual mean of the perturbed households
+    # to eliminate the initialization bias (the 'Expectation Gap').
+    state.alpha_bar = alpha_h.mean(axis=0)
+    state.alpha_bar /= state.alpha_bar.sum()
+    state.alpha_slow = state.alpha_bar.copy()
+    state.alpha_habit = state.alpha_bar.copy()
 
     return state

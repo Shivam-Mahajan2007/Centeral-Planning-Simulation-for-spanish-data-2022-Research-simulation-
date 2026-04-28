@@ -93,6 +93,9 @@ def main():
         habit_persistence=config.get("habit_persistence", 0.7),
         nominal_consumption_annual=config.get("nominal_consumption_annual", 807e9),
         slim_history=config.get("slim_history", None),
+        n_households=config.get("n_households", 4),
+        hh_dispersion=config.get("hh_dispersion", 0.05),
+        n_firms=config.get("n_firms", 5),
     )
     if "rng_seed" in config and config["rng_seed"] is not None:
         state.rng = np.random.default_rng(config["rng_seed"])

@@ -330,14 +330,24 @@ end
 # Intra-quarter tatonnement: evolves preferences via log-OU toward alpha_slow,
 # clears monthly prices via iterative excess-demand correction, and accumulates
 # revealed demand for the planner's G_hat signal.
+#
+# Multi-household support: when alpha_h (n_h × n), gamma_h (n_h × n) and
+# Y_h (n_h,) are provided, aggregate consumer demand during tatonnement is
+# computed as the sum of individual household LES demands:
+#   C_d = Σ_h [ γ_h + α_h · max(Y_h − P·γ_h, ε) / P ]
+# Each household's alpha_h evolves via its own independent LN-AR process.
 function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
                    rng::AbstractRNG,
                    drift_rho::Real, drift_sigma::Real, noise_sigma::Real,
                    Y::Real, gamma, K_v, n_months::Int=3;
                    theta_drift::Float64=0.1,
-                   max_price_iter::Int=25,
+                   max_price_iter::Int=50,
                    price_tol::Float64=0.005,
-                   price_step_cap::Float64=0.5)
+                   price_step_cap::Float64=0.5,
+                   alpha_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
+                   gamma_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
+                   Y_h::Union{Nothing, AbstractVector{Float64}}=nothing,
+                   alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing)
 
     P_base_v  = _v(P_base)
     C_plan_v  = _v(C_plan)
@@ -346,9 +356,26 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
     K_v_vec   = _v(K_v)
     Y_f       = Float64(Y)
 
+    # Determine if multi-household mode is active
+    multi_hh = !isnothing(alpha_h) && !isnothing(gamma_h) && !isnothing(Y_h)
+    n_h_count = multi_hh ? size(alpha_h, 1) : 0
+
+    # Mutable copy of per-household preferences for LN-AR evolution
+    local alpha_h_ev
+    if multi_hh
+        alpha_h_ev = copy(alpha_h)   # (n_h, n) — will be mutated each month
+    end
+
     C_m     = C_plan_v ./ n_months
     gamma_m = gamma_v  ./ n_months
     Y_m     = Y_f / n_months
+
+    # Per-household monthly quantities
+    local gamma_h_m, Y_h_m
+    if multi_hh
+        gamma_h_m = gamma_h ./ n_months   # (n_h, n)
+        Y_h_m     = Y_h ./ n_months       # (n_h,)
+    end
 
     n         = length(P_base_v)
     C_monthly = zeros(n_months, n)
@@ -364,7 +391,7 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
 
     for tau in 1:n_months
 
-        # 1. Preference drift: log-OU mean-reversion toward alpha_slow
+        # 1. Aggregate preference drift: log-OU mean-reversion toward alpha_slow
         log_f = [a > 1e-25 ? log(a) : -25.0 for a in a_f]
         log_s = [a > 1e-25 ? log(a) : -25.0 for a in alpha_s_v]
 
@@ -379,11 +406,44 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         exp_f = exp.(log_f)
         a_f   = exp_f ./ max(sum(exp_f), 1e-30)
 
+        # 1b. Per-household LN-AR drift: each household evolves independently
+        if multi_hh
+            for h in 1:n_h_count
+                # Retrieve household-specific habit targets if available
+                as_h = !isnothing(alpha_slow_h) ? alpha_slow_h[h, :] : alpha_s_v
+                log_sh = [a > 1e-25 ? log(a) : -25.0 for a in as_h]
+                
+                for i in 1:n
+                    if active[i]
+                        log_ah = alpha_h_ev[h, i] > 1e-25 ? log(alpha_h_ev[h, i]) : -25.0
+                        drift_h  = theta_drift * (log_sh[i] - log_ah)
+                        shock_h  = drift_sigma  * randn(rng)
+                        noise_h  = noise_sigma  * randn(rng)
+                        alpha_h_ev[h, i] = exp(log_ah + drift_h + shock_h + noise_h)
+                    end
+                end
+                # Re-normalise so each household's shares sum to 1
+                row_sum = max(sum(alpha_h_ev[h, :]), 1e-30)
+                alpha_h_ev[h, :] ./= row_sum
+            end
+        end
+
         # 2. Iterative price tatonnement toward market clearing
         P_iter = copy(P_base_v)
         for _ in 1:max_price_iter
-            resid_Y_iter = max(Y_m - dot(P_iter, gamma_m), 1e-30)
-            C_d_iter     = gamma_m .+ a_f .* resid_Y_iter ./ max.(P_iter, 1e-30)
+            # Compute aggregate demand: sum of individual household demands
+            if multi_hh
+                C_d_iter = zeros(n)
+                for h in 1:n_h_count
+                    gamma_hm_h  = gamma_h_m[h, :]
+                    alpha_hh    = alpha_h_ev[h, :]
+                    resid_Y_h_iter = max(Y_h_m[h] - dot(P_iter, gamma_hm_h), 1e-30)
+                    C_d_iter   .+= gamma_hm_h .+ alpha_hh .* resid_Y_h_iter ./ max.(P_iter, 1e-30)
+                end
+            else
+                resid_Y_iter = max(Y_m - dot(P_iter, gamma_m), 1e-30)
+                C_d_iter     = gamma_m .+ a_f .* resid_Y_iter ./ max.(P_iter, 1e-30)
+            end
             Z_iter       = C_d_iter .- C_m
             eps_iter = min.(-1.0 .+ (gamma_m ./ max.(C_d_iter, 1e-30)) .* (1.0 .- a_f), -1e-4)
             correction = clamp.(
@@ -397,11 +457,24 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         end
         P_clear = P_iter
 
-        resid_Y_star = max(Y_m - dot(P_clear, gamma_m), 1e-30)
-        C_d          = gamma_m .+ a_f .* resid_Y_star ./ max.(P_clear, 1e-30)
+        # Compute final cleared demand using summed household demands
+        if multi_hh
+            C_d = zeros(n)
+            resid_Y_star = 0.0
+            for h in 1:n_h_count
+                gamma_hm_h = gamma_h_m[h, :]
+                alpha_hh   = alpha_h_ev[h, :]
+                ry_h       = max(Y_h_m[h] - dot(P_clear, gamma_hm_h), 1e-30)
+                C_d       .+= gamma_hm_h .+ alpha_hh .* ry_h ./ max.(P_clear, 1e-30)
+                resid_Y_star += ry_h
+            end
+        else
+            resid_Y_star = max(Y_m - dot(P_clear, gamma_m), 1e-30)
+            C_d          = gamma_m .+ a_f .* resid_Y_star ./ max.(P_clear, 1e-30)
+        end
 
         # 3. Revealed preference shares from LES expenditure
-        a_reveal_sum .+= (P_clear .* (C_d .- gamma_m)) ./ resid_Y_star
+        a_reveal_sum .+= (P_clear .* (C_d .- gamma_m)) ./ max(resid_Y_star, 1e-30)
 
         # 4. LES price-correction signal for G_hat
         eps_final = min.(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f), -1e-4)
@@ -439,11 +512,13 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         alpha_mean       = a_reveal_sum ./ n_months,
         g_alpha_final    = zeros(n),
         alpha_noise_final = zeros(n),
+        alpha_h_final    = multi_hh ? alpha_h_ev : zeros(0, 0),
     )
 end
-# Solves the global linear program for all competitive firms across all sectors simultaneously
-function solve_firm_lp(v_MIP_py, B_dense_py, K_firms_py, X_star_py)
-    v_MIP = _v(v_MIP_py)
+# Decentralized firm LP: each firm independently maximizes its own income
+# subject to its own capital constraints, then outputs are reconciled to X_star.
+function solve_firm_lp(v_MIP_py, B_dense_py, K_firms_py, X_star_py, tol=0.001)
+    v_MIP = max.(_v(v_MIP_py), 1e-6)
     B_dense = _m(B_dense_py)
     K_firms = _m(K_firms_py)
     X_star = _v(X_star_py)
@@ -451,33 +526,58 @@ function solve_firm_lp(v_MIP_py, B_dense_py, K_firms_py, X_star_py)
     n_firms = size(K_firms, 1)
     n = length(X_star)
     
-    model = Model(HiGHS.Optimizer)
-    set_silent(model)
+    # Parallel Iterative Filling Algorithm (Restored)
+    # --------------------------------------------------------------------------
+    # Firms act as autonomous greedy agents, but are coordinated via 
+    # iterative residual quotas to ensure the 'Plan Filling' constraint.
     
-    # X_f[j, f] represents production of sector j by firm f
-    @variable(model, X_f[1:n, 1:n_firms] >= 0)
+    X_f_total = zeros(n, n_firms)
+    K_rem = copy(K_firms)
+    v_plan = max.(v_MIP, 1e-6)
     
-    # maximize aggregate income value
-    @objective(model, Max, sum(v_MIP[j] * X_f[j, f] for j in 1:n, f in 1:n_firms))
-    
-    # constraint: overall firm output is bounded by aggregate planner target
-    @constraint(model, [j in 1:n], sum(X_f[j, f] for f in 1:n_firms) <= X_star[j])
-    
-    # constraint: firm specific Leontief generic capital bottlenecks
-    for i in 1:n
+    for iter in 1:100
+        X_agg = vec(sum(X_f_total, dims=2))
+        residual = max.(X_star .- X_agg, 0.0)
+        
+        if maximum(residual ./ max.(X_star, 1e-12)) < tol
+            break
+        end
+        
+        X_step = zeros(n, n_firms)
         for f in 1:n_firms
-            # K_f[f, i] > sum_j B_dense[i, j] X_f[j, f]
-            @constraint(model, sum(B_dense[i, j] * X_f[j, f] for j in 1:n if B_dense[i, j] > 1e-12) <= K_firms[f, i])
+            if sum(K_rem[f, :]) < 1e-9 continue end
+            
+            model = Model(HiGHS.Optimizer)
+            set_silent(model)
+            @variable(model, x[j=1:n] >= 0)
+            @objective(model, Max, sum(v_plan[j] * x[j] for j in 1:n))
+            
+            # Independent Quota: ensures they collectively fill the plan
+            for j in 1:n
+                @constraint(model, x[j] <= residual[j] / n_firms)
+            end
+            
+            for i in 1:n
+                nz = [j for j in 1:n if B_dense[i, j] > 1e-12]
+                if !isempty(nz)
+                    @constraint(model, sum(B_dense[i, j] * x[j] for j in nz) <= K_rem[f, i])
+                end
+            end
+            
+            optimize!(model)
+            if termination_status(model) == MOI.OPTIMAL
+                X_step[:, f] .= value.(x)
+            end
+        end
+        
+        X_f_total .+= X_step
+        for f in 1:n_firms
+            K_rem[f, :] .-= B_dense * X_step[:, f]
+            K_rem[f, :] .= max.(K_rem[f, :], 0.0)
         end
     end
     
-    optimize!(model)
-    
-    if termination_status(model) == MOI.OPTIMAL
-        return value.(X_f)
-    else
-        return zeros(n, n_firms)
-    end
+    return X_f_total
 end
 
 end  # module ModelCore

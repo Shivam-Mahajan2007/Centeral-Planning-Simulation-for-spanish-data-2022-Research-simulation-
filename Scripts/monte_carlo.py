@@ -78,8 +78,12 @@ def plot_fan_chart(data, title, ylabel, out_path, start_year=2022, exclude_outli
     ax.fill_between(x, p25_val, p75_val, color="#3498db", alpha=0.30, label="IQR (p25-p75)")
     ax.fill_between(x, mean_val - std_val, mean_val + std_val, color="#3498db", alpha=0.10, label="Mean ± 1σ")
     ax.plot(x, mean_val, color="#2c3e50", linewidth=2.5, label="Mean")
-    for i in range(min(15, n_runs)):
-        ax.plot(x, data[i, :], color="#bdc3c7", linewidth=0.5, alpha=0.4)
+    # Only plot individual trajectories within 1σ of the mean at the final quarter
+    final_mean = mean_val[-1]
+    final_std  = std_val[-1]
+    for i in range(n_runs):
+        if abs(data[i, -1] - final_mean) <= final_std:
+            ax.plot(x, data[i, :], color="#bdc3c7", linewidth=0.5, alpha=0.4)
 
     ax.set_title(title, fontsize=13, fontweight='bold', pad=15)
     ax.set_ylabel(ylabel); ax.set_xlabel("Quarter")
@@ -95,7 +99,7 @@ def main():
     with open("Data/config.json", "r") as f:
         config = json.load(f)
 
-    n_runs = 20
+    n_runs = 100
     n_q    = 20
     config["n_quarters"] = n_q
 

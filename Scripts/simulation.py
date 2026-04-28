@@ -36,23 +36,27 @@ def run_quarter(state: ModelState) -> ModelState:
     slim = getattr(state, "slim_history", False)
     logger.info(f"\n-- Q{t+1} {'-'*50}")
 
-    # --- Habit formation ---------------------------------------------------------
-    gamma = getattr(state, "habit_persistence", 0.7)
+    # --- Per-household Habit formation -------------------------------------------
+    gamma_habit = getattr(state, "habit_persistence", 0.7)
+    n_h = state.n_households
 
     if t == 0:
-        state.alpha_habit = state.alpha_bar.copy()
+        state.alpha_habit_h = state.alpha_h.copy()
+        state.alpha_habit  = state.alpha_bar.copy()
     else:
-        expenditures      = state.P_monthly * state.C_monthly
-        subsistence_exp   = state.P_monthly * state.gamma
-        discretionary_exp = np.maximum(expenditures - subsistence_exp, 0.0)
-        discretionary_total = np.maximum(discretionary_exp.sum(axis=1, keepdims=True), 1e-30)
-        realized_shares   = (discretionary_exp / discretionary_total).mean(axis=0)
-        realized_shares  /= realized_shares.sum()
-        state.alpha_habit = gamma * getattr(state, "alpha_habit", state.alpha_bar) + (1 - gamma) * realized_shares
-        state.alpha_habit = np.maximum(state.alpha_habit, 1e-30)
+        # We use alpha_true_h (the每月 evolved values returned from fast_loop)
+        # as the realized preferences for each household.
+        for h in range(n_h):
+            alpha_hh = state.alpha_true_h[h, :]
+            state.alpha_habit_h[h, :] = gamma_habit * state.alpha_habit_h[h, :] + (1 - gamma_habit) * alpha_hh
+            state.alpha_habit_h[h, :] /= state.alpha_habit_h[h, :].sum()
+
+        # Update aggregate habit as a mean for the planner/diagnostics
+        state.alpha_habit = state.alpha_habit_h.mean(axis=0)
         state.alpha_habit /= state.alpha_habit.sum()
 
-    state.alpha_slow = state.alpha_habit.copy()
+    state.alpha_slow_h = state.alpha_habit_h.copy()
+    state.alpha_slow   = state.alpha_habit.copy()
 
     # --- Growth signal smoothing -------------------------------------------------
     if t == 0:
@@ -138,7 +142,7 @@ def run_quarter(state: ModelState) -> ModelState:
     K_total_i = state.K_firms.sum(axis=0)
     safe_denom = np.where(K_total_i > 1e-12, K_total_i, 1.0)
     firm_capital_share = state.K_firms / safe_denom[None, :]
-    firm_capital_share = np.where(K_total_i[None, :] > 1e-12, firm_capital_share, 1.0 / 5)
+    firm_capital_share = np.where(K_total_i[None, :] > 1e-12, firm_capital_share, 1.0 / state.n_firms)
     I_firms     = firm_capital_share * I_vec[None, :]
     K_firms_new = (1 - state.delta) * state.K_firms + I_firms
 
@@ -175,7 +179,7 @@ def run_quarter(state: ModelState) -> ModelState:
     
     # Offload the massive generic sparse block-angular constraint LP directly 
     # to the compiled Julia-side Highs optimizer across all sectors simultaneously
-    X_f = solve_firm_lp(v_MIP, B_dense, state.K_firms, X_star)
+    X_f = solve_firm_lp(v_MIP, B_dense, state.K_firms, X_star, tol=state.primal_tol)
 
     total_cap_all_sectors = np.zeros(state.n)
     for j in range(state.n):
@@ -200,8 +204,8 @@ def run_quarter(state: ModelState) -> ModelState:
         logger.warning(f"   [WARNING] Firm allocation sum does not match X_star (dev: {max_rel_dev:.2e})")
 
     # --- Firm income and aggregate Y ---------------------------------------------
-    Y_f_mat = v_eff[:, None] * X_f        # (N, 5)
-    Y_f     = Y_f_mat.sum(axis=0)         # (5,) per-firm total income
+    Y_f_mat = v_eff[:, None] * X_f        # (N, n_firms)
+    Y_f     = Y_f_mat.sum(axis=0)         # (n_firms,) per-firm total income
 
     # income_scale is calibrated once at Q1 and held fixed thereafter
     if t == 0:
@@ -218,7 +222,6 @@ def run_quarter(state: ModelState) -> ModelState:
     inflation_rate = inflation_link - 1.0
 
     # Geometric mean inflation
-    # P_old might contain zeros in some edge cases (though unlikely for Spanish data calibration)
     price_relatives = P_new / np.where(state.P > 1e-30, state.P, 1e-30)
     valid_mask      = (state.P > 1e-6) & (P_new > 1e-6)
     if valid_mask.any():
@@ -239,18 +242,63 @@ def run_quarter(state: ModelState) -> ModelState:
     logger.info(f"   Y_firm = {Y/1e9:.2f} B EUR  Y_planner = {Y_planner/1e9:.2f} B EUR  "
                 f"(gap = {abs(Y - Y_planner)/max(Y, 1e-30)*100:.3f}%)")
 
-    # --- Intra-quarter tatonnement -----------------------------------------------
+    # --- Multi-household demand aggregation --------------------------------------
+    # Distribute firm income to households via ownership matrix W
+    n_h = state.n_households
+    Y_f_scaled = Y_f * state.income_scale          # (n_firms,) scaled firm incomes
+    Y_h = state.W_ownership @ Y_f_scaled           # (n_h,) household incomes
+
+    # Intra-quarter tatonnement: run with multi-household demand aggregation
     fast_res = fast_loop(
         P_new, C_star, state.alpha_true, state.alpha_slow, state.rng,
         state.pref_drift_rho, state.pref_drift_sigma, state.pref_noise_sigma,
         Y, state.gamma, K_eff,
-        theta_drift=state.theta_drift
+        theta_drift=state.theta_drift,
+        alpha_h=state.alpha_true_h,
+        gamma_h=state.gamma_h,
+        Y_h=Y_h,
+        alpha_slow_h=state.alpha_slow_h,
+        price_tol=state.price_tol,
+        max_price_iter=state.max_price_iter
     )
-    state.alpha_true = fast_res["alpha_true_final"]
+
+    # Use the cleared prices from fast_loop for household demand
+    P_final = fast_res["P_final"]
+
+    # Each household independently computes LES demand
+    C_h_all = np.zeros((n_h, state.n))
+    for h in range(n_h):
+        gamma_h   = state.gamma_h[h, :]
+        alpha_h   = state.alpha_true_h[h, :]
+        Y_hh      = Y_h[h]
+        resid_Y_h = max(Y_hh - np.dot(P_final, gamma_h), 1e-30)
+        C_h_all[h, :] = gamma_h + alpha_h * resid_Y_h / np.maximum(P_final, 1e-30)
+
+    # Per-household preferences are now evolved monthly inside fast_loop via
+    # independent LN-AR processes; pick up the end-of-quarter state.
+    alpha_h_evolved = fast_res.get("alpha_h_final")
+    if alpha_h_evolved is not None and alpha_h_evolved.size > 0:
+        state.alpha_true_h = alpha_h_evolved
+
+    # Aggregate alpha via Gorman expenditure-share weighting:
+    # alpha_i = sum_h alpha_{i,h} * (Y_h - P*gamma_h) / (Y_total - P*gamma)
+    Y_total = float(Y_h.sum())
+    P_gamma_agg = np.dot(P_final, state.gamma)
+    denom_agg = max(Y_total - P_gamma_agg, 1e-30)
+
+    alpha_agg = np.zeros(state.n)
+    for h in range(n_h):
+        gamma_h = state.gamma_h[h, :]
+        weight_h = max(Y_h[h] - np.dot(P_final, gamma_h), 1e-30) / denom_agg
+        alpha_agg += state.alpha_true_h[h, :] * weight_h
+    alpha_agg = np.maximum(alpha_agg, 0)
+    alpha_agg /= max(alpha_agg.sum(), 1e-30)
+
+    state.alpha_true = alpha_agg.copy()
 
     alpha_gap      = float(np.linalg.norm(state.alpha_true - state.alpha))
     alpha_gap_linf = float(np.abs(state.alpha_true - state.alpha).max())
-    logger.info(f"   alpha_true gap: norm={alpha_gap:.4f}  inf={alpha_gap_linf:.4f}")
+    logger.info(f"   alpha_true gap (multi-HH): norm={alpha_gap:.4f}  inf={alpha_gap_linf:.4f}")
 
     # --- Preference update -------------------------------------------------------
     state.P       = fast_res["P_final"]
@@ -259,13 +307,8 @@ def run_quarter(state: ModelState) -> ModelState:
     state.P_monthly = fast_res["P_monthly"]
     state.price_drift = fast_res["price_drift"]
 
-    gamma_m     = state.gamma / 3.0
-    surplus_exp = fast_res["P_monthly"] * (fast_res["C_monthly"] - gamma_m)
-    net_income  = np.maximum(surplus_exp.sum(axis=1, keepdims=True), 1e-30)
-    alpha_new   = (surplus_exp / net_income).mean(axis=0)
-    alpha_new   = np.maximum(alpha_new, 0)
-    alpha_new   = alpha_new / alpha_new.sum() if alpha_new.sum() > 0 else state.alpha.copy()
-    alpha_new   = 0.5 * state.alpha + 0.5 * alpha_new
+    # Planner alpha update uses Gorman-aggregated revealed preferences
+    alpha_new   = 0.5 * state.alpha + 0.5 * alpha_agg
     alpha_new  /= alpha_new.sum()
 
     # --- Real metrics (constant Q1 prices) ---------------------------------------

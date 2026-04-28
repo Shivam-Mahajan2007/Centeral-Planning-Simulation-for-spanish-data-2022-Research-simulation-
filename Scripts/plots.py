@@ -412,20 +412,26 @@ def plot_investment_gdp_ratio(history, save_path, ref_pct: float = 19.8,
 
 
 def plot_firm_income_distribution(hist, n, out_path):
-    """Bar chart of income distributed across 5 firms for the top 10 sectors."""
+    """Bar chart of income distributed across firms for the top 10 sectors."""
     import matplotlib.pyplot as plt
     h_final = hist[-1]
     v_MIP   = h_final.get("v_MIP", np.zeros(n))
-    X_f     = h_final.get("X_f",   np.zeros((n, 5)))
+    X_f     = h_final.get("X_f",   np.zeros((n, 2))) # Fallback
+    n_firms = X_f.shape[1]
+    
     Y_f_mat = v_MIP[:, None] * X_f
     top_10_idx = np.argsort(Y_f_mat.sum(axis=1))[-10:]
     names   = [h_final["sector_short"][i] for i in top_10_idx]
-    colors  = ["#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22"]
+    
+    # Dynamic coloring for arbitrary n_firms
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i) for i in range(n_firms)]
+    
     fig, ax = plt.subplots(figsize=(12, 7))
     bottom = np.zeros(10)
-    for f in range(5):
+    for f in range(n_firms):
         vals = Y_f_mat[top_10_idx, f] / 1e9
-        ax.bar(names, vals, bottom=bottom, color=colors[f], alpha=0.9, label=f"Firm {f+1}")
+        ax.bar(names, vals, bottom=bottom, color=colors[f % 10], alpha=0.9, label=f"Firm {f+1}")
         bottom += vals
     ax.set_title("Income Distribution Across Firms (Top 10 Sectors)", fontsize=14, fontweight='bold')
     ax.set_ylabel("Production Income (B EUR nominal)")
