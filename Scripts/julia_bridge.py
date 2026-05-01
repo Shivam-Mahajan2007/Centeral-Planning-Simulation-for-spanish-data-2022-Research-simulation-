@@ -1,3 +1,6 @@
+import os
+os.environ["PYTHON_JULIACALL_THREADS"] = "auto"
+
 import numpy as np
 import logging
 from pathlib import Path
@@ -11,12 +14,12 @@ from juliacall import Main as jl
 JULIA_CORE = Path(__file__).parent / "model_core.jl"
 
 def _load_core():
-    jl.seval("""
-        if isdefined(Main, :ModelCore)
-            Core.eval(Main, :(ModelCore = nothing))
+    # Only include the file if the Module isn't already defined to avoid constant redefinition errors
+    jl.seval(f"""
+        if !isdefined(Main, :ModelCore)
+            include("{str(JULIA_CORE)}")
         end
     """)
-    jl.include(str(JULIA_CORE))
     core = jl.ModelCore
     jl.seval("using Random")
     return core
@@ -114,34 +117,10 @@ def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
         "C_hat":            np.asarray(res.C_hat),
         "G_hat_bare":       np.asarray(res.G_hat_bare),
         "alpha_h_final":    np.asarray(res.alpha_h_final),
+        "alpha_macro_final": np.asarray(res.alpha_macro_final),
     }
 
-def compute_income(v, X_star, pi, A):
-    res = CORE.compute_income(
-        float(v),
-        np.asarray(X_star, dtype=np.float64),
-        np.asarray(pi,     dtype=np.float64),
-        _to_dense(A),
-    )
-    return float(res)
 
-def evolve_structural_alpha(as_low, rng, ah_abit, drift_slow, kappa_slow):
-    seed   = int(rng.integers(0, 2**32))
-    jl_rng = jl.Random.MersenneTwister(seed)
-    res = CORE.evolve_structural_alpha(
-        np.asarray(as_low, dtype=np.float64),
-        jl_rng,
-        np.asarray(ah_abit, dtype=np.float64),
-        float(drift_slow), float(kappa_slow)
-    )
-    return np.array(res)
-
-def revealed_demand(*args, **kwargs):
-    # Dummy to satisfy old imports if any exist
-    return np.array([0.0])
-
-def infer_growth(C_hat, C_prev):
-    return (np.asarray(C_hat) / np.maximum(np.asarray(C_prev), 1e-12)) - 1.0
 
 def compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step, k=25):
     res = CORE.compute_investment(

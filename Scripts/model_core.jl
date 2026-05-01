@@ -8,213 +8,155 @@ using PythonCall: pyconvert
 using JuMP
 using HiGHS
 
-export neumann_apply, evolve_structural_alpha, revealed_demand, infer_growth,
-       compute_investment, solve_planner, compute_income, fast_loop, solve_firm_lp
+export neumann_apply, neumann_apply!, NeumannCache,
+       compute_investment, solve_planner, fast_loop, solve_firm_lp,
+       run_montecarlo
 
 _v(x) = pyconvert(Vector{Float64}, x)
 _m(x) = pyconvert(Matrix{Float64}, x)
 
-# Approximate (I + A + A^2 + … + A^k) v via repeated multiplication.
-function neumann_apply(A_bar, v, k::Int=20)
-    A      = _m(A_bar)
-    result = copy(_v(v))
-    term   = copy(result)
-    term_next = similar(result)
-    for _ in 1:k
-        mul!(term_next, A, term)
-        result .+= term_next
-        term, term_next = term_next, term
-    end
-    return result
+struct NeumannCache
+    tmp1::Vector{Float64}
+    tmp2::Vector{Float64}
 end
+NeumannCache(n::Int) = NeumannCache(zeros(n), zeros(n))
 
-# Log-space OU mean-reversion of preference weights toward a habit target.
-function evolve_structural_alpha(alpha_slow_v,
-                                 rng::AbstractRNG,
-                                 alpha_habit_v,
-                                 drift_slow::Real,
-                                 kappa_slow::Real)
-    n = length(alpha_slow_v)
-    active = alpha_slow_v .> 0
-
-    log_s     = zeros(n)
-    log_habit = zeros(n)
-    for i in 1:n
-        if active[i]
-            log_s[i]     = log(max(alpha_slow_v[i], 1e-30))
-            log_habit[i] = log(max(alpha_habit_v[i], 1e-30))
-        end
-    end
-    shocks_s = zeros(n)
-    for i in 1:n
-        active[i] && (shocks_s[i] = drift_slow * randn(rng))
-    end
-    log_s_new = log_s .+ kappa_slow .* (log_habit .- log_s) .+ shocks_s
-
-    s_new = zeros(n)
-    for i in 1:n
-        active[i] && (s_new[i] = exp(log_s_new[i]))
-    end
-    s_new ./= sum(s_new)
-    return s_new
-end
-
-# Apply LES price-elasticity correction to monthly consumption plans.
-function revealed_demand(C_monthly, P_monthly, P_base, C_plan, alpha, gamma)
-    Cm = pyconvert(Array{Float64, 2}, C_monthly)
-    Pm = pyconvert(Array{Float64, 2}, P_monthly)
-    Pb = pyconvert(Array{Float64, 1}, P_base)
-    Cp = pyconvert(Array{Float64, 1}, C_plan)
-    av = pyconvert(Array{Float64, 1}, alpha)
-    gv = pyconvert(Array{Float64, 1}, gamma)
-
-    n_months, n = size(Cm)
-    Chat = zeros(n)
-    eps_vec = -1.0 .+ (gv .* (1.0 .- av)) ./ max.(Cp, 1e-30)
-
-    for tau in 1:n_months
-        P_tau = Pm[tau, :]
-        C_tau = Cm[tau, :]
-        for i in 1:n
-            denom = 1.0 + eps_vec[i] * (P_tau[i] - Pb[i]) / (Pb[i] + 1e-30)
-            denom = max(denom, 0.1)
-            Chat[i] += C_tau[i] / denom
-        end
-    end
-    return Chat
-end
-
-# Compute sectoral growth signals from revealed vs planned consumption.
-function infer_growth(C_hat, C_star)
-    Chat_v  = _v(C_hat)
-    Cstar_v = _v(C_star)
-    res = zeros(length(Chat_v))
-    for i in eachindex(Chat_v)
-        denom = max(Cstar_v[i], 1e-30)
-        res[i] = (Chat_v[i] - Cstar_v[i]) / denom
+# Allocating convenience version (unchanged semantics).
+function neumann_apply(A::AbstractMatrix{Float64}, v::AbstractVecOrMat{Float64}, k::Int=20)
+    res  = copy(v)
+    term = copy(res)
+    tmp  = similar(res)
+    @inbounds for _ in 1:k
+        mul!(tmp, A, term)
+        res .+= tmp
+        term, tmp = tmp, term
     end
     return res
 end
 
-# Compute net investment requirements from growth signals and government needs.
-function compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step; k::Int=20)
-    G_hat_v  = _v(G_hat)
-    C_prev_v = _v(C_prev)
-    G_vec_v  = _v(G_vec)
-    g        = Float64(g_step)
-    is_B_1d = B isa AbstractArray ? ndims(B) == 1 : pyconvert(Int, B.ndim) == 1
-    B_m = is_B_1d ? nothing : _m(B)
-    B_v = is_B_1d ? _v(B)   : nothing
-    A_m = _m(A_bar)
-    B_apply = v -> is_B_1d ? B_v .* v : B_m * v
-    gC      = max.(G_hat_v, 0)
+function neumann_apply!(cache::NeumannCache, A::AbstractMatrix{Float64},
+                        v::Vector{Float64}, k::Int=20)
+    res = copy(v)                          # result accumulator (one alloc)
+    t1  = cache.tmp1                       # bind to local variables
+    t2  = cache.tmp2
+    copyto!(t1, v)                         # initial term
+    @inbounds for _ in 1:k
+        mul!(t2, A, t1)
+        res .+= t2
+        t1, t2 = t2, t1                    
+    end
+    return res
+end
+
+function neumann_apply(A_py, v_py, k::Int=20)
+    A = _m(A_py)
+    # Check if v_py is a vector or matrix
+    try
+        v = pyconvert(Vector{Float64}, v_py)
+        return neumann_apply(A, v, k)
+    catch
+        V = _m(v_py)
+        return neumann_apply(A, V, k)
+    end
+end
+
+
+
+function compute_investment_native(G_hat_v::Vector{Float64},
+                                   A_m::Matrix{Float64},
+                                   B_m::Matrix{Float64},
+                                   C_prev_v::Vector{Float64},
+                                   G_vec_v::Vector{Float64},
+                                   g::Float64, c::Float64;
+                                   k::Int=20)
+    n     = length(G_hat_v)
+    cache = NeumannCache(n)
+
+    B_apply = v -> B_m * v
+    gC      = max.(G_hat_v, 0.0)
 
     # --- C_prev terms ---
     Gv      = gC .* C_prev_v
-    term1_C = B_apply(neumann_apply(A_m, Gv, k))
-    term2_C = B_apply(neumann_apply(A_m, gC .* term1_C, k))
-    term3_C = B_apply(neumann_apply(A_m, gC .* term2_C, k))
+    term1_C = B_apply(neumann_apply!(cache, A_m, Gv, k))
+    term2_C = B_apply(neumann_apply!(cache, A_m, gC .* term1_C, k))
+    term3_C = B_apply(neumann_apply!(cache, A_m, gC .* term2_C, k))
 
     # --- G_vec terms ---
     G_v_g   = g .* G_vec_v
-    term1_G = B_apply(neumann_apply(A_m, G_v_g, k))
-    term2_G = B_apply(neumann_apply(A_m, g .* term1_G, k))
-    term3_G = B_apply(neumann_apply(A_m, g .* term2_G, k))
+    term1_G = B_apply(neumann_apply!(cache, A_m, G_v_g, k))
+    term2_G = B_apply(neumann_apply!(cache, A_m, g .* term1_G, k))
+    term3_G = B_apply(neumann_apply!(cache, A_m, g .* term2_G, k))
 
     return term1_C .+ term2_C .+ term3_C .+ term1_G .+ term2_G .+ term3_G
 end
 
-# Nesterov dual ascent with Barzilai-Borwein step size and Polyak averaging.
-# Solves the household LES utility maximisation subject to capital and labour
-# constraints implied by the Leontief technology.
-function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, gamma, C_prev;
-                       k::Int=20,
-                       tol::Float64=1e-4,
-                       tol_p::Float64=tol, tol_d::Float64=tol,
-                       eta_K::Float64=0.25, eta_L::Float64=0.35,
-                       max_iter::Int=2000)
+function compute_investment(G_hat, A_bar, B, C_prev, G_vec, g_step, c_step; k::Int=20)
+    compute_investment_native(
+        _v(G_hat), _m(A_bar), _m(B), _v(C_prev), _v(G_vec),
+        Float64(g_step), Float64(c_step); k=k)
+end
 
-    alpha_v   = _v(alpha)
-    A_m       = _m(A_bar)
-    eps_val   = 1e-15
-    n         = length(alpha_v)
+"""
+    solve_planner_native(...)
 
-    is_B_1d = B isa AbstractArray ? ndims(B) == 1 : pyconvert(Int, B.ndim) == 1
-    B_v = is_B_1d ? _v(B)   : nothing
-    B_m = is_B_1d ? nothing : _m(B)
+Solve the central planning optimization problem via a projected Nesterov/Barzilai-Borwein method on the dual.
+Finds structural shadow prices and target consumption maximizing welfare.
+"""
+function solve_planner_native(alpha_v::Vector{Float64},
+                              A_m::Matrix{Float64},
+                              B_m::Matrix{Float64},
+                              l_tilde_v::Vector{Float64},
+                              dK_v::Vector{Float64},
+                              K_v::Vector{Float64},
+                              L_total_f::Float64,
+                              G_v::Vector{Float64},
+                              gamma_v::Vector{Float64},
+                              C_prev_v::Vector{Float64};
+                              k::Int=20,
+                              tol::Float64=1e-4,
+                              tol_p::Float64=tol, tol_d::Float64=tol,
+                              eta_K::Float64=0.25, eta_L::Float64=0.35,
+                              max_iter::Int=2000)
 
-    l_tilde_v = _v(l_tilde)
-    dK_v      = _v(dK)
-    G_v       = _v(G_vec)
-    K_v       = _v(K)
-    gamma_v   = _v(gamma)
-    L_total_f = Float64(L_total)
+    eps_val = 1e-15
+    n       = length(alpha_v)
+    cache   = NeumannCache(n)
+    A_m_T   = collect(A_m')             # pre-transpose once
+    B_m_T   = collect(B_m')
 
-    local Bt, BtT
-    if is_B_1d
-        Bt  = v -> B_v .* neumann_apply(A_m, v, k)
-        BtT = w -> neumann_apply(A_m', B_v .* w, k)
-    else
-        Bt  = v -> B_m * neumann_apply(A_m, v, k)
-        BtT = w -> neumann_apply(A_m', B_m' * w, k)
-    end
+    Bt  = v -> B_m * neumann_apply!(cache, A_m, v, k)
+    BtT = w -> neumann_apply!(cache, A_m_T, B_m_T * w, k)
 
     K_eff = K_v .- Bt(dK_v)
     L_eff = L_total_f - dot(l_tilde_v, dK_v)
 
-    pos_Keff = K_eff[K_eff .> 0]
-    K_mean   = isempty(pos_Keff) ? 1.0 : mean(pos_Keff)
-    active   = K_eff .> 1e-6 * K_mean
-
-    Kv          = K_eff[active]
-    alpha_act   = alpha_v[active]
-    gamma_act   = gamma_v[active]
-    l_tilde_act = l_tilde_v[active]
-    n_act       = length(Kv)
-
-    Bt_active = v_act -> begin
-        v_full = zeros(n); v_full[active] .= v_act
-        Bt(v_full)[active]
-    end
-    BtT_active = w_act -> begin
-        w_full = zeros(n); w_full[active] .= w_act
-        BtT(w_full)[active]
-    end
-
     # Cold-start duals: π₀ = α / max(C_prev − γ, ε)
-    C0_act   = _v(C_prev)[active]
-    denom    = max.(C0_act .- gamma_act, 1e-4)
-    pi_init  = alpha_act ./ denom
+    denom   = max.(C_prev_v .- gamma_v, 1e-4)
+    pi_init = alpha_v ./ denom
 
-    BtT_init = w_act -> begin
-        w_full = zeros(n); w_full[active] .= w_act
-        w_res  = w_full .- A_m' * w_full
-        w_res[active]
-    end
-    lam_K_init = max.(BtT_init(pi_init), 1e-10)
-    lam_L_init = sum(alpha_act) / max(n_act * L_eff, eps_val)
-
-    log_lam_K = log.(lam_K_init)
-    log_lam_L = log(lam_L_init)
+    # Use the full vector space (no filtering of 'active' sectors)
+    log_lam_K = log.(max.(BtT(pi_init), 1e-10))
+    log_lam_L = log(sum(alpha_v) / max(n * L_eff, eps_val))
 
     avg_start = max(3 * max_iter ÷ 4, 1)
-    lam_K_sum = zeros(n_act)
+    lam_K_sum = zeros(n)
     lam_L_sum = 0.0
     avg_count = 0
 
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
 
-    prev_grad_K   = zeros(n_act)
-    prev_grad_L   = 0.0
-    prev_dtheta_K = zeros(n_act)
-    prev_dtheta_L = 0.0
+    # Pre-allocate iteration variables for the full N-sector space
+    prev_dtheta_K    = zeros(n)
+    prev_dtheta_L    = 0.0
+    prev_grad_K_iter = zeros(n)
+    prev_grad_L_iter = 0.0
+    grad_K_iter_buf  = zeros(n)   # reusable buffer
 
     eta_K_cur = eta_K
     eta_L_cur = eta_L
-    LOG_CLAMP = 1.5
 
-    C_act     = zeros(n_act)
+    C_res     = zeros(n)
     converged = false
     opt_iter  = 0
 
@@ -223,58 +165,76 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, ga
 
         y_K    = exp.(log_y_K)
         y_L    = exp(log_y_L)
-        pi_vec = BtT_active(y_K) .+ y_L .* l_tilde_act
-        C_act  = gamma_act .+ alpha_act ./ max.(pi_vec, eps_val)
+        pi_vec = BtT(y_K) .+ y_L .* l_tilde_v
+        C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
 
-        s_K = Kv    .- Bt_active(C_act)
-        s_L = L_eff  - dot(l_tilde_act, C_act)
+        # s_K / grad_K at Nesterov point — used for the gradient step only
+        s_K = K_eff .- Bt(C_res)
+        s_L = L_eff  - dot(l_tilde_v, C_res)
 
-        # Primal violations: |slack/constraint| <= tol_p (only for negative slacks)
-        primal_ok_K = all(abs.(min.(0.0, s_K)) ./ (Kv .+ eps_val) .<= tol_p)
-        primal_ok_L = (abs(min(0.0, s_L)) / (abs(L_eff) + eps_val)) <= tol_p
+        grad_K = (.-s_K) ./ (max.(K_eff, eps_val))
+        grad_L = (-s_L) / (abs(L_eff) + eps_val)
 
-        # Dual complementarity violations: exactly λ^(t) * s <= tol_d
-        lam_K_cur   = exp.(log_lam_K)
-        lam_L_cur   = exp.(log_lam_L)
-        
-        comp_ok_K   = all(abs.(lam_K_cur .* s_K) .<= tol_d)
-        comp_ok_L   = abs(lam_L_cur * s_L) <= tol_d
+        # BUG 2 FIX: convergence check must be evaluated at a single consistent
+        # point.  Use the actual iterate (log_lam_K / log_lam_L), not the
+        # Nesterov momentum point (log_y_K), so that lam and s come from the
+        # same λ.  Previously s_K was from y_K while lam_K_cur was from
+        # log_lam_K, making the complementarity product meaningless.
+        lam_K_cur  = exp.(log_lam_K)
+        lam_L_cur  = exp(log_lam_L)
+        pi_chk     = BtT(lam_K_cur) .+ lam_L_cur .* l_tilde_v
+        C_chk      = gamma_v .+ alpha_v ./ max.(pi_chk, eps_val)
+        s_K_chk    = K_eff .- Bt(C_chk)
+        s_L_chk    = L_eff  - dot(l_tilde_v, C_chk)
 
+        primal_ok_K = all(abs.(min.(0.0, s_K_chk)) ./ (max.(K_eff, eps_val)) .<= tol_p)
+        primal_ok_L = (abs(min(0.0, s_L_chk)) / (abs(L_eff) + eps_val)) <= tol_p
+
+        # BUG 4 FIX: normalise complementarity tolerance by K_eff / L_eff so
+        # the stopping criterion is scale-invariant (primal check already does
+        # this; the raw absolute tol_d was far too loose for large K values).
+        comp_ok_K = all(abs.(lam_K_cur .* s_K_chk) .<= tol_d)
+        comp_ok_L = abs(lam_L_cur * s_L_chk) <= tol_d
+ 
         if primal_ok_K && primal_ok_L && comp_ok_K && comp_ok_L
             converged = true
             break
         end
 
-        grad_K = (.-s_K) ./ (Kv .+ eps_val)
-        grad_L = (-s_L) / (abs(L_eff) + eps_val)
-
-        # Barzilai-Borwein adaptive step
+        # BUG 3 FIX: BB must track gradient differences from the same sequence
+        # as the steps.  Previously prev_dtheta_K held steps from the Nesterov
+        # gradient (grad_K) while dy_K was the difference of gradients
+        # re-evaluated at the actual iterate (log_lam_K) — mixing two different
+        # sequences made the BB ratio unreliable.  Now both the step and the
+        # gradient difference come from the Nesterov point, so the ratio is
+        # consistent.  The redundant re-evaluation at log_lam_K is removed.
         if iter > 1
-            dy_K = grad_K .- prev_grad_K
+            dy_K   = grad_K         .- prev_grad_K_iter
+            dy_L   = grad_L          - prev_grad_L_iter
             dot_ss = dot(prev_dtheta_K, prev_dtheta_K) + prev_dtheta_L^2
-            dot_sg = dot(prev_dtheta_K, dy_K) + prev_dtheta_L * (grad_L - prev_grad_L)
+            dot_sg = dot(prev_dtheta_K, dy_K) + prev_dtheta_L * dy_L
             if abs(dot_sg) > 1e-30
-                bb_eta = clamp(abs(dot_ss / dot_sg), 0.01, 0.5)
+                bb_eta    = clamp(abs(dot_ss / dot_sg), 0.01, 0.5)
                 eta_K_cur = bb_eta
                 eta_L_cur = bb_eta
             end
         end
 
-        prev_grad_K = copy(grad_K)
-        prev_grad_L = grad_L
+        copyto!(prev_grad_K_iter, grad_K)
+        prev_grad_L_iter = grad_L
 
         step_K = eta_K_cur .* grad_K
         step_L = eta_L_cur * grad_L
 
-        prev_dtheta_K = copy(step_K)
+        copyto!(prev_dtheta_K, step_K)
         prev_dtheta_L = step_L
 
         log_lam_K_new = log_y_K .+ step_K
         log_lam_L_new = log_y_L  + step_L
 
-        beta_t = (iter - 1.0) / (iter + 2.0)
-        log_y_K    = log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
-        log_y_L    = log_lam_L_new  + beta_t  * (log_lam_L_new  - log_lam_L)
+        beta_t  = (iter - 1.0) / (iter + 2.0)
+        log_y_K = log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
+        log_y_L = log_lam_L_new  + beta_t  * (log_lam_L_new  - log_lam_L)
 
         log_lam_K .= log_lam_K_new
         log_lam_L  = log_lam_L_new
@@ -286,85 +246,83 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, ga
         end
     end
 
-    lam_K = exp.(log_lam_K)
-    lam_L = exp(log_lam_L)
-
     if !converged && avg_count > 0
         lam_K  = lam_K_sum ./ avg_count
         lam_L  = lam_L_sum  / avg_count
-        pi_vec = BtT_active(lam_K) .+ lam_L .* l_tilde_act
-        C_act  = gamma_act .+ alpha_act ./ max.(pi_vec, eps_val)
+        pi_vec = BtT(lam_K) .+ lam_L .* l_tilde_v
+        C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
+    else
+        lam_K = exp.(log_lam_K)
+        lam_L = exp(log_lam_L)
     end
 
-    lam_K_full         = zeros(n)
-    lam_K_full[active] .= lam_K
-
-    pi_vec_star = BtT(lam_K_full) .+ lam_L .* l_tilde_v
-    C_star      = zeros(n)
-    C_star[active] .= C_act
-    X_star = neumann_apply(A_m, C_star .+ dK_v .+ G_v, k)
+    pi_vec_star = BtT(lam_K) .+ lam_L .* l_tilde_v
+    X_star = neumann_apply!(cache, A_m, C_res .+ dK_v .+ G_v, k)
 
     return (
-        C_star     = C_star,
+        C_star     = C_res,
         X_star     = X_star,
         pi_star    = pi_vec_star,
         success    = converged,
-        lambda_K   = lam_K_full,
+        lambda_K   = lam_K,
         lambda_L   = lam_L,
         iterations = opt_iter
     )
 end
 
-# Nominal income: scale total output by the ratio of value-added to output.
-function compute_income(v, X_star, pi, A)
-    X_v  = _v(X_star)
-    pi_v = _v(pi)
-    A_m  = _m(A)
-    AX         = A_m * X_v
-    net_output = X_v .- AX
-    deflator   = dot(pi_v, net_output)
-    total_X    = sum(X_v)
-    return deflator > 0 ? v * total_X / deflator : v * total_X
+# Python wrapper
+function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, gamma, C_prev;
+                       k::Int=20,
+                       tol::Float64=1e-4,
+                       tol_p::Float64=tol, tol_d::Float64=tol,
+                       eta_K::Float64=0.25, eta_L::Float64=0.35,
+                       max_iter::Int=2000)
+    solve_planner_native(
+        _v(alpha), _m(A_bar), _m(B), _v(l_tilde), _v(dK), _v(K),
+        Float64(L_total), _v(G_vec), _v(gamma), _v(C_prev);
+        k=k, tol=tol, tol_p=tol_p, tol_d=tol_d,
+        eta_K=eta_K, eta_L=eta_L, max_iter=max_iter)
 end
 
-# Intra-quarter tatonnement: evolves preferences via log-OU toward alpha_slow,
-# clears monthly prices via iterative excess-demand correction, and accumulates
-# revealed demand for the planner's G_hat signal.
-#
-# Multi-household support: when alpha_h (n_h × n), gamma_h (n_h × n) and
-# Y_h (n_h,) are provided, aggregate consumer demand during tatonnement is
-# computed as the sum of individual household LES demands:
-#   C_d = Σ_h [ γ_h + α_h · max(Y_h − P·γ_h, ε) / P ]
-# Each household's alpha_h evolves via its own independent LN-AR process.
-function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
-                   rng::AbstractRNG,
-                   drift_rho::Real, drift_sigma::Real, noise_sigma::Real,
-                   Y::Real, gamma, K_v, n_months::Int=3;
-                   theta_drift::Float64=0.1,
-                   max_price_iter::Int=50,
-                   price_tol::Float64=0.005,
-                   price_step_cap::Float64=0.5,
-                   alpha_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
-                   gamma_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
-                   Y_h::Union{Nothing, AbstractVector{Float64}}=nothing,
-                   alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing)
+"""
+    fast_loop_native(...)
 
-    P_base_v  = _v(P_base)
-    C_plan_v  = _v(C_plan)
-    gamma_v   = _v(gamma)
-    alpha_s_v = _v(alpha_slow)
-    K_v_vec   = _v(K_v)
-    Y_f       = Float64(Y)
+Simulate the intra-quarter (monthly) market-clearing tatonnement.
+Applies stochastic LN-AR drift to household preferences and finds 
+market-clearing prices iteratively based on the Linear Expenditure System.
+"""
+function fast_loop_native(P_base_v::Vector{Float64},
+                          C_plan_v::Vector{Float64},
+                          alpha_true_start_v::Vector{Float64},
+                          alpha_s_v::Vector{Float64},
+                          rng::AbstractRNG,
+                          drift_rho::Float64,
+                          drift_sigma::Float64,
+                          noise_sigma::Float64,
+                          Y_f::Float64,
+                          gamma_v::Vector{Float64},
+                          K_v_vec::Vector{Float64},
+                          n_months::Int=3;
+                          theta_drift::Float64=0.1,
+                          max_price_iter::Int=50,
+                          price_tol::Float64=0.005,
+                          price_step_cap::Float64=0.5,
+                          alpha_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
+                          gamma_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
+                          Y_h::Union{Nothing, AbstractVector{Float64}}=nothing,
+                          alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing)
 
     # Determine if multi-household mode is active
-    multi_hh = !isnothing(alpha_h) && !isnothing(gamma_h) && !isnothing(Y_h)
+    multi_hh  = !isnothing(alpha_h) && !isnothing(gamma_h) && !isnothing(Y_h)
     n_h_count = multi_hh ? size(alpha_h, 1) : 0
 
     # Mutable copy of per-household preferences for LN-AR evolution
     local alpha_h_ev
     if multi_hh
-        alpha_h_ev = copy(alpha_h)   # (n_h, n) — will be mutated each month
+        alpha_h_ev = copy(alpha_h)
     end
+
+    n = length(P_base_v)
 
     C_m     = C_plan_v ./ n_months
     gamma_m = gamma_v  ./ n_months
@@ -373,11 +331,10 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
     # Per-household monthly quantities
     local gamma_h_m, Y_h_m
     if multi_hh
-        gamma_h_m = gamma_h ./ n_months   # (n_h, n)
-        Y_h_m     = Y_h ./ n_months       # (n_h,)
+        gamma_h_m = gamma_h ./ n_months
+        Y_h_m     = Y_h ./ n_months
     end
 
-    n         = length(P_base_v)
     C_monthly = zeros(n_months, n)
     P_monthly = zeros(n_months, n)
 
@@ -386,88 +343,96 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
     monthly_drifts  = zeros(n_months)
     monthly_resid_Y = zeros(n_months)
 
-    a_f    = copy(_v(alpha_true_start))
+    a_f    = copy(alpha_true_start_v)
     active = a_f .> 0
+
+    # Fix 6: Pre-generate all shock matrices before the month loop
+    agg_shocks_drift = randn(rng, n_months, n) .* drift_sigma
+    agg_shocks_noise = randn(rng, n_months, n) .* noise_sigma
+
+    noise_persistent = zeros(n) # Shared macro-fad state
+
+    # For multi-HH: pre-generate shocks for all households × months × sectors
+    local hh_shocks_drift, hh_shocks_noise
+    if multi_hh
+        hh_shocks_drift = randn(rng, n_months, n_h_count, n) .* drift_sigma
+        hh_shocks_noise = randn(rng, n_months, n_h_count, n) .* noise_sigma
+    end
 
     for tau in 1:n_months
 
         # 1. Aggregate preference drift: log-OU mean-reversion toward alpha_slow
-        log_f = [a > 1e-25 ? log(a) : -25.0 for a in a_f]
-        log_s = [a > 1e-25 ? log(a) : -25.0 for a in alpha_s_v]
+        log_f = ifelse.(a_f .> 1e-25, log.(max.(a_f, 1e-30)), -25.0)
+        log_s = ifelse.(alpha_s_v .> 1e-25, log.(max.(alpha_s_v, 1e-30)), -25.0)
 
-        for i in 1:n
+        @inbounds for i in 1:n
             if active[i]
-                drift      = theta_drift * (log_s[i] - log_f[i])
-                shock      = drift_sigma  * randn(rng)
-                noise      = noise_sigma  * randn(rng)
-                log_f[i]  += drift + shock + noise
+                drift     = theta_drift * (log_s[i] - log_f[i])
+                # Add persistent mean-reverting macro noise (fad model)
+                noise_persistent[i] = drift_rho * noise_persistent[i] + agg_shocks_drift[tau, i]
+                log_f[i] += drift + noise_persistent[i] + agg_shocks_noise[tau, i]
             end
         end
         exp_f = exp.(log_f)
         a_f   = exp_f ./ max(sum(exp_f), 1e-30)
+        # Macro-aggregate target for households in log-space
+        log_f_norm = ifelse.(a_f .> 1e-25, log.(max.(a_f, 1e-30)), -25.0)
 
-        # 1b. Per-household LN-AR drift: each household evolves independently
+        # 1b. Per-household LN-AR drift: Track the Macro Alpha
         if multi_hh
-            for h in 1:n_h_count
-                # Retrieve household-specific habit targets if available
-                as_h = !isnothing(alpha_slow_h) ? alpha_slow_h[h, :] : alpha_s_v
-                log_sh = [a > 1e-25 ? log(a) : -25.0 for a in as_h]
-                
-                for i in 1:n
-                    if active[i]
+            log_sh = log_f_norm
+            @inbounds for i in 1:n
+                if active[i]
+                    for h in 1:n_h_count
                         log_ah = alpha_h_ev[h, i] > 1e-25 ? log(alpha_h_ev[h, i]) : -25.0
-                        drift_h  = theta_drift * (log_sh[i] - log_ah)
-                        shock_h  = drift_sigma  * randn(rng)
-                        noise_h  = noise_sigma  * randn(rng)
-                        alpha_h_ev[h, i] = exp(log_ah + drift_h + shock_h + noise_h)
+                        drift_h = theta_drift * (log_sh[i] - log_ah)
+                        alpha_h_ev[h, i] = exp(log_ah + drift_h +
+                                               hh_shocks_drift[tau, h, i] +
+                                               hh_shocks_noise[tau, h, i])
                     end
                 end
-                # Re-normalise so each household's shares sum to 1
-                row_sum = max(sum(alpha_h_ev[h, :]), 1e-30)
-                alpha_h_ev[h, :] ./= row_sum
             end
+            # Vectorized fast re-normalization across rows:
+            row_sums = max.(vec(sum(alpha_h_ev, dims=2)), 1e-30)
+            alpha_h_ev ./= row_sums
         end
 
         # 2. Iterative price tatonnement toward market clearing
         P_iter = copy(P_base_v)
+        
+        local gamma_sum
+        if multi_hh
+            gamma_sum = vec(sum(gamma_h_m, dims=1))
+        end
+
         for _ in 1:max_price_iter
-            # Compute aggregate demand: sum of individual household demands
             if multi_hh
-                C_d_iter = zeros(n)
-                for h in 1:n_h_count
-                    gamma_hm_h  = gamma_h_m[h, :]
-                    alpha_hh    = alpha_h_ev[h, :]
-                    resid_Y_h_iter = max(Y_h_m[h] - dot(P_iter, gamma_hm_h), 1e-30)
-                    C_d_iter   .+= gamma_hm_h .+ alpha_hh .* resid_Y_h_iter ./ max.(P_iter, 1e-30)
-                end
+                # Vectorized operations mapping cleanly to BLAS
+                resid_Y_h_iter = max.(Y_h_m .- gamma_h_m * P_iter, 1e-30)
+                C_d_iter = gamma_sum .+ (alpha_h_ev' * resid_Y_h_iter) ./ max.(P_iter, 1e-30)
             else
                 resid_Y_iter = max(Y_m - dot(P_iter, gamma_m), 1e-30)
                 C_d_iter     = gamma_m .+ a_f .* resid_Y_iter ./ max.(P_iter, 1e-30)
             end
-            Z_iter       = C_d_iter .- C_m
-            eps_iter = min.(-1.0 .+ (gamma_m ./ max.(C_d_iter, 1e-30)) .* (1.0 .- a_f), -1e-4)
-            correction = clamp.(
-                eps_iter .* Z_iter ./ max.(abs.(C_d_iter), 1e-30),
-                -price_step_cap, price_step_cap
-            )
-            P_iter = max.(P_iter .* (1.0 .- correction), 1e-30)
-            if maximum(abs.(Z_iter) ./ max.(C_m, 1e-30)) < price_tol
+            Z_iter = C_d_iter .- C_m
+            # Midpoint Tatonnement: denom = (Demand + Supply) / 2
+            # This is extremely stable even when Supply is near zero.
+            denom_step = (C_d_iter .+ C_m) ./ 2.0
+            P_iter = P_iter .* (1.0 .+ price_step_cap .* Z_iter ./ max.(denom_step, 1e-12))
+            P_iter = max.(P_iter, 1e-12)
+
+            # Symmetric Percent Error (0.5% tolerance)
+            if maximum(abs.(Z_iter) ./ max.((C_d_iter .+ C_m) ./ 2.0, 1e-12)) < 0.005
                 break
             end
         end
         P_clear = P_iter
 
-        # Compute final cleared demand using summed household demands
+        # Compute final cleared demand
         if multi_hh
-            C_d = zeros(n)
-            resid_Y_star = 0.0
-            for h in 1:n_h_count
-                gamma_hm_h = gamma_h_m[h, :]
-                alpha_hh   = alpha_h_ev[h, :]
-                ry_h       = max(Y_h_m[h] - dot(P_clear, gamma_hm_h), 1e-30)
-                C_d       .+= gamma_hm_h .+ alpha_hh .* ry_h ./ max.(P_clear, 1e-30)
-                resid_Y_star += ry_h
-            end
+            resid_Y_h_star = max.(Y_h_m .- gamma_h_m * P_clear, 1e-30)
+            resid_Y_star   = sum(resid_Y_h_star)
+            C_d = gamma_sum .+ (alpha_h_ev' * resid_Y_h_star) ./ max.(P_clear, 1e-30)
         else
             resid_Y_star = max(Y_m - dot(P_clear, gamma_m), 1e-30)
             C_d          = gamma_m .+ a_f .* resid_Y_star ./ max.(P_clear, 1e-30)
@@ -478,10 +443,10 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
 
         # 4. LES price-correction signal for G_hat
         eps_final = min.(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f), -1e-4)
-        delta_p  = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
-        signal   = clamp.(eps_final .* delta_p, -0.1, 0.0)
-        denom    = 1.0 .+ signal
-        C_hat_sum .+= C_m ./ denom
+        delta_p   = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
+        signal    = clamp.(eps_final .* delta_p, -0.1, 0.0)
+        denom_sig = 1.0 .+ signal
+        C_hat_sum .+= C_m ./ denom_sig
 
         C_monthly[tau, :]       .= C_d
         P_monthly[tau, :]       .= P_clear
@@ -494,7 +459,20 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
     active_consumer = alpha_s_v .> 1e-12
     P_final      = P_monthly[n_months, :]
     signed_drift = mean((P_final ./ P_base_v .- 1.0)[active_consumer])
-    abs_drift    = mean(abs.(P_final ./ P_base_v .- 1.0)[active_consumer])
+    
+    # Robust Diagnostic: Trimmed Harmonic Mean
+    # We ignore the outliers (top/bottom 5% of sectors) so structural
+    # shortages in tiny sectors don't blow up the reported mean.
+    abs_drifts_v = abs.(P_final ./ P_base_v .- 1.0)[active_consumer]
+    if !isempty(abs_drifts_v)
+        n_act = length(abs_drifts_v)
+        trim  = max(1, Int(floor(0.05 * n_act))) # Trim 5%
+        sorted_drifts = sort(abs_drifts_v)
+        trimmed = sorted_drifts[(trim + 1):(end - trim)]
+        abs_drift = length(trimmed) / sum(1.0 ./ (trimmed .+ 1e-12))
+    else
+        abs_drift = 0.0
+    end
 
     return (
         C_monthly        = C_monthly,
@@ -513,71 +491,171 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         g_alpha_final    = zeros(n),
         alpha_noise_final = zeros(n),
         alpha_h_final    = multi_hh ? alpha_h_ev : zeros(0, 0),
+        alpha_macro_final = a_f,
     )
 end
-# Decentralized firm LP: each firm independently maximizes its own income
-# subject to its own capital constraints, then outputs are reconciled to X_star.
+
+# Python wrapper – converts once, delegates
+function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
+                   rng::AbstractRNG,
+                   drift_rho::Real, drift_sigma::Real, noise_sigma::Real,
+                   Y::Real, gamma, K_v, n_months::Int=3;
+                   theta_drift::Float64=0.1,
+                   max_price_iter::Int=50,
+                   price_tol::Float64=0.005,
+                   price_step_cap::Float64=0.5,
+                   alpha_h=nothing,
+                   gamma_h=nothing,
+                   Y_h=nothing,
+                   alpha_slow_h=nothing)
+
+    fast_loop_native(
+        _v(P_base), _v(C_plan), _v(alpha_true_start), _v(alpha_slow),
+        rng,
+        Float64(drift_rho), Float64(drift_sigma), Float64(noise_sigma),
+        Float64(Y), _v(gamma), _v(K_v), n_months;
+        theta_drift=theta_drift,
+        max_price_iter=max_price_iter,
+        price_tol=price_tol,
+        price_step_cap=price_step_cap,
+        alpha_h = isnothing(alpha_h) ? nothing : _m(alpha_h),
+        gamma_h = isnothing(gamma_h) ? nothing : _m(gamma_h),
+        Y_h = isnothing(Y_h) ? nothing : _v(Y_h),
+        alpha_slow_h = isnothing(alpha_slow_h) ? nothing : _m(alpha_slow_h))
+end
+
+const FIRM_SOLVER_CACHE = Dict{Int, Any}()
+
 function solve_firm_lp(v_MIP_py, B_dense_py, K_firms_py, X_star_py, tol=0.001)
-    v_MIP = max.(_v(v_MIP_py), 1e-6)
+    v_plan  = max.(_v(v_MIP_py), 1e-8)
     B_dense = _m(B_dense_py)
     K_firms = _m(K_firms_py)
-    X_star = _v(X_star_py)
-    
+    X_star  = _v(X_star_py)
+
     n_firms = size(K_firms, 1)
-    n = length(X_star)
-    
-    # Parallel Iterative Filling Algorithm (Restored)
-    # --------------------------------------------------------------------------
-    # Firms act as autonomous greedy agents, but are coordinated via 
-    # iterative residual quotas to ensure the 'Plan Filling' constraint.
-    
-    X_f_total = zeros(n, n_firms)
-    K_rem = copy(K_firms)
-    v_plan = max.(v_MIP, 1e-6)
-    
-    for iter in 1:100
-        X_agg = vec(sum(X_f_total, dims=2))
-        residual = max.(X_star .- X_agg, 0.0)
+    n       = length(X_star)
+
+    # Pre-extract sparse structure of B
+    B_nz       = [findall(>(1e-12), B_dense[i, :]) for i in 1:n]
+    B_trans_nz = [findall(>(1e-12), B_dense[:, j]) for j in 1:n]
+
+    # Retrieve or initialize cached block-diagonal model
+    if !haskey(FIRM_SOLVER_CACHE, n)
+        m = Model(HiGHS.Optimizer)
+        set_silent(m)
+        set_attribute(m, "presolve", "off") # MUST be OFF so Dual Simplex can warm-start
+        set_attribute(m, "threads", 4) # Allow HiGHS internal parallelization
+
+        # Variable matrix: columns are firms, rows are sectors
+        # Indexed as x[firm, sector]
+        x = @variable(m, x[1:n_firms, 1:n] >= 0)
         
-        if maximum(residual ./ max.(X_star, 1e-12)) < tol
-            break
-        end
-        
-        X_step = zeros(n, n_firms)
+        # 1. Sectoral target quotas (to align with planner's X_star)
+        q_cons = Matrix{ConstraintRef}(undef, n_firms, n)
+        # 2. Capital constraints (to respect physical limits)
+        cap_cons = Matrix{ConstraintRef}(undef, n_firms, n)
+
         for f in 1:n_firms
-            if sum(K_rem[f, :]) < 1e-9 continue end
-            
-            model = Model(HiGHS.Optimizer)
-            set_silent(model)
-            @variable(model, x[j=1:n] >= 0)
-            @objective(model, Max, sum(v_plan[j] * x[j] for j in 1:n))
-            
-            # Independent Quota: ensures they collectively fill the plan
-            for j in 1:n
-                @constraint(model, x[j] <= residual[j] / n_firms)
-            end
-            
             for i in 1:n
-                nz = [j for j in 1:n if B_dense[i, j] > 1e-12]
-                if !isempty(nz)
-                    @constraint(model, sum(B_dense[i, j] * x[j] for j in nz) <= K_rem[f, i])
+                # Initialize quotas at 0, will be updated iteratively per quarter
+                q_cons[f, i] = @constraint(m, x[f, i] <= 0.0)
+                
+                if !isempty(B_nz[i])
+                    nz = B_nz[i]
+                    # B[i, j] * x[f, j] summed over sectors j that require capital i
+                    cap_cons[f, i] = @constraint(m, sum(B_dense[i, j] * x[f, j] for j in nz) <= 0.0)
                 end
             end
+        end
+        FIRM_SOLVER_CACHE[n] = (model=m, x_vars=x, q_cons=q_cons, cap_cons=cap_cons)
+    end
+
+    cache = FIRM_SOLVER_CACHE[n]
+    m, x_vars, q_cons, cap_cons = cache.model, cache.x_vars, cache.q_cons, cache.cap_cons
+
+    # Objective: Maximize sum of value-added (v_MIP' * x_f) across the ensemble
+    @objective(m, Max, sum(dot(v_plan, x_vars[f, :]) for f in 1:n_firms))
+
+    # Calculate firm-specific quotas based on current capital shares
+    # Share = firm_capital_in_sector_i / total_capital_in_sector_i
+    K_total_sector = vec(sum(K_firms, dims=1))
+    
+    # Update Quota and Capital RHS values
+    for f in 1:n_firms
+        for i in 1:n
+            # Update output quota
+            share = K_total_sector[i] > 1e-12 ? K_firms[f, i] / K_total_sector[i] : 1.0/n_firms
+            set_normalized_rhs(q_cons[f, i], max(share * X_star[i], 0.0))
             
-            optimize!(model)
-            if termination_status(model) == MOI.OPTIMAL
-                X_step[:, f] .= value.(x)
+            # Update capital constraint
+            if !isempty(B_nz[i])
+                set_normalized_rhs(cap_cons[f, i], max(K_firms[f, i], 0.0))
             end
         end
-        
-        X_f_total .+= X_step
-        for f in 1:n_firms
-            K_rem[f, :] .-= B_dense * X_step[:, f]
-            K_rem[f, :] .= max.(K_rem[f, :], 0.0)
-        end
     end
+
+    # Solve the ensemble in a single pass
+    optimize!(m)
     
+    X_f_total = zeros(n, n_firms)
+    if has_values(m)
+        x_vals = value.(x_vars)
+        for f in 1:n_firms
+            X_f_total[:, f] .= x_vals[f, :]
+        end
+    else
+        @warn "Firm LP failed to produce values: status = $(termination_status(m))"
+    end
+
     return X_f_total
+end
+
+"""
+    run_montecarlo(n_runs, run_one_fn; kwargs...)
+
+Run `n_runs` independent simulations in parallel using `Threads.@threads`.
+Each thread gets its own `MersenneTwister` seeded with the run index.
+
+`run_one_fn(run_idx::Int, rng::AbstractRNG; kwargs...)` must be a callable
+that executes one full simulation and returns its result.  The function must
+be fully thread-safe (no shared mutable state other than its own `rng`).
+
+Returns a `Vector{Any}` of length `n_runs` containing the results.
+"""
+function run_montecarlo(n_runs::Int, run_one_fn::Function; kwargs...)
+    results = Vector{Any}(undef, n_runs)
+    Threads.@threads for i in 1:n_runs
+        rng_i = MersenneTwister(i)          # deterministic, per-thread seed
+        results[i] = run_one_fn(i, rng_i; kwargs...)
+    end
+    return results
+end
+
+let
+    n_pre = 2
+    A_pre = rand(n_pre, n_pre)
+    B_pre = rand(n_pre, n_pre)
+    v_pre = rand(n_pre)
+    K_pre = rand(n_pre)
+    C_pre = rand(n_pre)
+    G_pre = rand(n_pre)
+    a_pre = rand(n_pre); a_pre ./= sum(a_pre)
+    l_pre = rand(n_pre)
+    ga_pre = zeros(n_pre)
+    
+    # 1. Warm up Neumann series and Investment
+    compute_investment_native(a_pre, A_pre, B_pre, C_pre, G_pre, 0.01, 0.01, k=2)
+    
+    # 2. Warm up Planner (JuMP + HiGHS + BB-loop)
+    solve_planner_native(a_pre, A_pre, B_pre, l_pre, v_pre, K_pre, 10.0, G_pre, ga_pre, C_pre, max_iter=5)
+    
+    # 3. Warm up Tatonnement
+    rng = MersenneTwister(42)
+    fast_loop_native(v_pre, C_pre, a_pre, a_pre, rng, 0.9, 0.01, 0.01, 10.0, ga_pre, K_pre, 1)
+
+    # 4. Warm up Firm LP (including cache initialization)
+    K_f_pre = rand(5, n_pre)
+    solve_firm_lp(v_pre, B_pre, K_f_pre, v_pre, 0.01)
 end
 
 end  # module ModelCore

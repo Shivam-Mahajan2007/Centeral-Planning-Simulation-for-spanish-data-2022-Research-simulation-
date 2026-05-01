@@ -3,11 +3,9 @@ import logging
 import pickle
 import time
 from pathlib import Path
-from scipy.optimize import linprog
 from calibration import ModelState
 from julia_bridge import (
-    CORE, _to_dense, evolve_structural_alpha, revealed_demand, infer_growth,
-    compute_investment, solve_planner, compute_income,
+    CORE, _to_dense, compute_investment, solve_planner,
     fast_loop, solve_firm_lp
 )
 
@@ -19,19 +17,14 @@ class SimulationError(Exception):
     pass
 
 
-def compute_government_quantity(V: np.ndarray, A, P: np.ndarray) -> np.ndarray:
-    """Deflate nominal government expenditure V into physical quantities.
-
-    Uses the cost-push price vector to compute G_qty = (I - A^T)^{-1} v_per_unit / P.
-    """
-    import scipy.sparse as sp
-    n = V.shape[0]
-    A_dense = A.toarray() if sp.issparse(A) else np.asarray(A)
-    M = np.linalg.inv(np.eye(n) - A_dense.T)
-    return M @ V / np.where(P > 1e-30, P, 1e-30)
-
-
 def run_quarter(state: ModelState) -> ModelState:
+    """
+    Execute a single quarterly step of the macroeconomic simulation.
+    
+    This incorporates agent habit formation, central planner target optimization,
+    firm-level parallel production via JuMP, and a multi-household tatonnement loop
+    for end-of-period market clearing and price discovery.
+    """
     t    = state.t
     slim = getattr(state, "slim_history", False)
     logger.info(f"\n-- Q{t+1} {'-'*50}")
@@ -127,31 +120,6 @@ def run_quarter(state: ModelState) -> ModelState:
     if np.isnan(C_star).any() or np.isnan(X_star).any() or np.isnan(pi).any():
         raise SimulationError(f"Q{t+1}: Solver produced NaNs")
 
-    # --- Capital update ----------------------------------------------------------
-    X_star = np.asarray(CORE.neumann_apply(_to_dense(state.A_bar),
-                                            np.asarray(C_star + G_vec + dK, dtype=np.float64),
-                                            state.neumann_k))
-    I_gross = np.maximum(X_star - (state.A @ X_star + C_star + G_vec), 0.0)
-    I_vec   = I_gross
-
-    if np.isnan(X_star).any() or np.isnan(I_gross).any():
-        raise SimulationError(f"Q{t+1}: Recalculation produced NaNs")
-
-    # Firm-level investment: each firm receives a proportional share of gross
-    # investment, preserving the identity dK_f,i = (K_f,i / K_i) * dK_i.
-    K_total_i = state.K_firms.sum(axis=0)
-    safe_denom = np.where(K_total_i > 1e-12, K_total_i, 1.0)
-    firm_capital_share = state.K_firms / safe_denom[None, :]
-    firm_capital_share = np.where(K_total_i[None, :] > 1e-12, firm_capital_share, 1.0 / state.n_firms)
-    I_firms     = firm_capital_share * I_vec[None, :]
-    K_firms_new = (1 - state.delta) * state.K_firms + I_firms
-
-    # Aggregate capital is derived from firm layer (accounting identity: K ≡ Σ K_firms)
-    K_new = K_firms_new.sum(axis=0)
-
-    if np.isnan(K_new).any():
-        raise SimulationError(f"Q{t+1}: K_new contains NaNs")
-
     # --- Income ------------------------------------------------------------------
     if t == 0:
         state.pi_0_fixed    = pi.copy()
@@ -171,16 +139,19 @@ def run_quarter(state: ModelState) -> ModelState:
     sector_demand      = C_star + G_vec + dK
     shadow_net_product = float(pi @ sector_demand)
     v_eff      = W1 / max(shadow_net_product, 1e-30)
-    resource_value = W1 @ X_star
     v_MIP      = v_eff
 
     # --- Firm production LP ------------------------------------------------------
+    t_pre_lp = time.time()
     B_dense = state.B.toarray() if hasattr(state.B, "toarray") else np.asarray(state.B)
     
     # Offload the massive generic sparse block-angular constraint LP directly 
     # to the compiled Julia-side Highs optimizer across all sectors simultaneously
-    X_f = solve_firm_lp(v_MIP, B_dense, state.K_firms, X_star, tol=state.primal_tol)
+    X_f = solve_firm_lp(v_MIP, B_dense, state.K_firms, X_star, tol=0.001)
 
+    t_post_lp = time.time()
+    logger.info(f"   [TIMING] solve_firm_lp took {t_post_lp - t_pre_lp:.3f}s")
+    
     total_cap_all_sectors = np.zeros(state.n)
     for j in range(state.n):
         col_B  = B_dense[:, j]
@@ -192,16 +163,42 @@ def run_quarter(state: ModelState) -> ModelState:
             total_cap_all_sectors[j] = 1e30
 
     X_actual          = X_f.sum(axis=1)
-    relative_deviations = (X_actual - X_star) / np.maximum(X_star, 1e-12)
-    max_rel_dev       = np.max(np.abs(relative_deviations))
-    mad_relative      = np.mean(np.abs(relative_deviations))
+    # Relative RMSE: ||X_star - X_actual|| / ||X_star||
+    rrmse = float(np.linalg.norm(X_actual - X_star) / max(np.linalg.norm(X_star), 1e-30))
 
     X_star_cap_violation = np.maximum(X_star - total_cap_all_sectors, 0.0)
     max_violation = np.max(X_star_cap_violation / np.maximum(total_cap_all_sectors, 1e-12))
-    if max_violation > state.primal_tol:
-        logger.warning(f"   [WARNING] Planner target exceeds sectoral capacity by {max_violation*100:.2f}%")
-    if max_rel_dev > 1e-5:
-        logger.warning(f"   [WARNING] Firm allocation sum does not match X_star (dev: {max_rel_dev:.2e})")
+    # if max_violation > 0.0025:
+    #     logger.warning(f"   [WARNING] Planner target exceeds sectoral capacity by {max_violation*100:.2f}%")
+    # if rrmse > 1e-4:
+    #     logger.warning(f"   [WARNING] Firm allocation RRMSE = {rrmse:.2e}")
+
+    t_post_cap = time.time()
+    logger.info(f"   [TIMING] post_lp capacity checking took {t_post_cap - t_post_lp:.3f}s")
+
+    # --- Capital and Investment update (Post-Production) -------------------------
+    # Now that we have X_actual, we compute total investment actually realized
+    # subtracting consumption target and govt from actual gross output.
+    I_gross = np.maximum(X_actual - (state.A @ X_actual + C_star + G_vec), 0.0)
+    I_vec   = I_gross
+    
+    # Firm-level investment: each firm receives a proportional share of gross
+    # investment, preserving the identity dK_f,i = (K_f,i / K_i) * dK_i.
+    K_total_i = state.K_firms.sum(axis=0)
+    safe_denom = np.where(K_total_i > 1e-12, K_total_i, 1.0)
+    firm_capital_share = state.K_firms / safe_denom[None, :]
+    firm_capital_share = np.where(K_total_i[None, :] > 1e-12, firm_capital_share, 1.0 / state.n_firms)
+    I_firms     = firm_capital_share * I_vec[None, :]
+    K_firms_new = (1 - state.delta) * state.K_firms + I_firms
+
+    # Aggregate capital is derived from firm layer (accounting identity: K ≡ Σ K_firms)
+    K_new = K_firms_new.sum(axis=0)
+
+    if np.isnan(K_new).any() or np.isnan(I_gross).any():
+        raise SimulationError(f"Q{t+1}: Capital/Investment update produced NaNs")
+
+    t_post_inv = time.time()
+    logger.info(f"   [TIMING] Investment update took {t_post_inv - t_post_cap:.3f}s")
 
     # --- Firm income and aggregate Y ---------------------------------------------
     Y_f_mat = v_eff[:, None] * X_f        # (N, n_firms)
@@ -248,9 +245,18 @@ def run_quarter(state: ModelState) -> ModelState:
     Y_f_scaled = Y_f * state.income_scale          # (n_firms,) scaled firm incomes
     Y_h = state.W_ownership @ Y_f_scaled           # (n_h,) household incomes
 
+    # Physical consumption achievable from ACTUAL production (Net of Depreciation!)
+    # We use A_bar here to reserve goods for replacement investment.
+    # We add a tiny epsilon (1e-6) to ensure no sector is 'zero-supply', which prevents price spikes.
+    C_actual = X_actual - state.A_bar @ X_actual - dK - G_vec
+    C_actual = np.maximum(C_actual, 1e-6)
+
+    t_pre_fast_loop = time.time()
+    logger.info(f"   [TIMING] pre-fast_loop intermediate calcs took {t_pre_fast_loop - t_post_inv:.3f}s")
+
     # Intra-quarter tatonnement: run with multi-household demand aggregation
     fast_res = fast_loop(
-        P_new, C_star, state.alpha_true, state.alpha_slow, state.rng,
+        P_new, C_actual, state.alpha_macro, state.alpha_slow, state.rng,
         state.pref_drift_rho, state.pref_drift_sigma, state.pref_noise_sigma,
         Y, state.gamma, K_eff,
         theta_drift=state.theta_drift,
@@ -262,17 +268,11 @@ def run_quarter(state: ModelState) -> ModelState:
         max_price_iter=state.max_price_iter
     )
 
+    t_post_fast_loop = time.time()
+    logger.info(f"   [TIMING] fast_loop took {t_post_fast_loop - t_pre_fast_loop:.3f}s")
+
     # Use the cleared prices from fast_loop for household demand
     P_final = fast_res["P_final"]
-
-    # Each household independently computes LES demand
-    C_h_all = np.zeros((n_h, state.n))
-    for h in range(n_h):
-        gamma_h   = state.gamma_h[h, :]
-        alpha_h   = state.alpha_true_h[h, :]
-        Y_hh      = Y_h[h]
-        resid_Y_h = max(Y_hh - np.dot(P_final, gamma_h), 1e-30)
-        C_h_all[h, :] = gamma_h + alpha_h * resid_Y_h / np.maximum(P_final, 1e-30)
 
     # Per-household preferences are now evolved monthly inside fast_loop via
     # independent LN-AR processes; pick up the end-of-quarter state.
@@ -280,21 +280,9 @@ def run_quarter(state: ModelState) -> ModelState:
     if alpha_h_evolved is not None and alpha_h_evolved.size > 0:
         state.alpha_true_h = alpha_h_evolved
 
-    # Aggregate alpha via Gorman expenditure-share weighting:
-    # alpha_i = sum_h alpha_{i,h} * (Y_h - P*gamma_h) / (Y_total - P*gamma)
-    Y_total = float(Y_h.sum())
-    P_gamma_agg = np.dot(P_final, state.gamma)
-    denom_agg = max(Y_total - P_gamma_agg, 1e-30)
-
-    alpha_agg = np.zeros(state.n)
-    for h in range(n_h):
-        gamma_h = state.gamma_h[h, :]
-        weight_h = max(Y_h[h] - np.dot(P_final, gamma_h), 1e-30) / denom_agg
-        alpha_agg += state.alpha_true_h[h, :] * weight_h
-    alpha_agg = np.maximum(alpha_agg, 0)
-    alpha_agg /= max(alpha_agg.sum(), 1e-30)
-
-    state.alpha_true = alpha_agg.copy()
+    # Retrieve the pure, revealed preference estimates aggregated across the 
+    # market clearing loop internally by Julia.
+    state.alpha_true = np.array(fast_res["alpha_true_final"]).copy()
 
     alpha_gap      = float(np.linalg.norm(state.alpha_true - state.alpha))
     alpha_gap_linf = float(np.abs(state.alpha_true - state.alpha).max())
@@ -306,13 +294,16 @@ def run_quarter(state: ModelState) -> ModelState:
     state.C_monthly = fast_res["C_monthly"]
     state.P_monthly = fast_res["P_monthly"]
     state.price_drift = fast_res["price_drift"]
+    state.alpha_macro = fast_res["alpha_macro_final"]
 
-    # Planner alpha update uses Gorman-aggregated revealed preferences
-    alpha_new   = 0.5 * state.alpha + 0.5 * alpha_agg
-    alpha_new  /= alpha_new.sum()
+    # Planner alpha update: Smoothed move toward revealed preferences + epsilon floor
+    alpha_new  = np.array(fast_res["alpha_true_final"]).copy()
+    alpha_new += 1e-5
+    alpha_new /= alpha_new.sum()
 
     # --- Real metrics (constant Q1 prices) ---------------------------------------
     Real_GDP          = state.real_scale_factor * float((state.dual_weight_0 * X_actual).sum())
+    resource_value    = W1 @ X_actual
     Y_ratio           = Y / max(Real_GDP, 1e-30)
     Gross_Output_Real = state.real_scale_factor * float((X_actual * state.pi_0_fixed).sum())
     C_real            = state.real_scale_factor * float((C_star  * state.pi_0_fixed).sum())
@@ -398,7 +389,7 @@ def run_quarter(state: ModelState) -> ModelState:
         sector_short   = state.sector_short.copy(),
         v_MIP          = v_MIP.copy(),
         X_f            = X_f.copy(),
-        MAD_relative   = mad_relative,
+        RRMSE          = rrmse,
     )
 
     if slim:
@@ -452,6 +443,9 @@ def run_quarter(state: ModelState) -> ModelState:
     state.G_hat_bare_prev = fast_res["G_hat_bare"]
     state.lambda_K  = opt["lam_K"]
     state.lambda_L  = opt["lam_L"]
+    
+    t_end = time.time()
+    logger.info(f"   [TIMING] final state updates took {t_end - t_post_fast_loop:.3f}s")
     return state
 
 

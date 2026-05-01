@@ -9,30 +9,64 @@ logger = logging.getLogger(__name__)
 
 from julia_bridge import CORE, _to_dense
 
+_B_MATRIX_CACHE = None
+
+def _get_structural_b_matrix(n: int, sector_names: List[str], data: dict) -> sp.csr_matrix:
+    """Retrieve or generate the global structural B-matrix (stochastic ensemble consistency)."""
+    global _B_MATRIX_CACHE
+    if _B_MATRIX_CACHE is not None:
+        return _B_MATRIX_CACHE.copy()
+    
+    diag_kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
+                 else _kappa(sector_names)
+    
+    B_diag = sp.diags(diag_kappa, format="csr")
+    
+    # Generate structural noise (seeds consistent matrix across Monte Carlo ensemble)
+    rng = np.random.default_rng(42)
+    noise_density = 0.05
+    n_noise = int(n * n * noise_density)
+    rows = rng.integers(0, n, size=n_noise)
+    cols = rng.integers(0, n, size=n_noise)
+    vals = rng.uniform(0.15, 0.2, size=n_noise)
+    
+    B_noise = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    B = (B_diag + B_noise).tolil()
+    B.setdiag(diag_kappa)  # Ensure diagonal strictly follows the kappa lookup
+    
+    B = B.tocsr()
+    B.eliminate_zeros()
+    
+    _B_MATRIX_CACHE = B.copy()
+    return _B_MATRIX_CACHE.copy()
+
 
 def _kappa(sector_names: List[str]) -> np.ndarray:
     """Return sector capital-intensity coefficients (diagonal of B, annual units)."""
-    k = np.ones(len(sector_names)) * 0.50
+    k = np.full(len(sector_names), 0.50)
+    
+    # Mapping of sector substrings to structural kappa values
+    mappings = [
+        (["real estate", "imputed rent"], 3.10),
+        (["electricity", "gas", "steam"], 2.17),
+        (["mining", "quarrying"], 1.86),
+        (["petroleum", "coke"], 1.55),
+        (["water supply", "natural water"], 1.24),
+        (["sewerage", "waste", "agricultur", "forestr", "fish"], 0.93),
+        (["chemical", "pharmaceutical", "motor vehicle"], 0.74),
+        (["food", "textile", "wood", "paper", "rubber", "plastic", 
+          "fabricated metal", "electrical", "machinery", "basic metal"], 0.62),
+        (["construct", "financial", "insurance"], 0.31),
+        (["telecommunication", "computer programming"], 0.37)
+    ]
+    
     for i, name in enumerate(sector_names):
         nm = name.lower()
-        if "real estate" in nm or "imputed rent" in nm:              k[i] = 3.10
-        elif any(x in nm for x in ["electricity", "gas", "steam"]):  k[i] = 2.17
-        elif any(x in nm for x in ["mining", "quarrying"]):          k[i] = 1.86
-        elif "petroleum" in nm or "coke" in nm:                      k[i] = 1.55
-        elif any(x in nm for x in ["water supply", "natural water"]): k[i] = 1.24
-        elif any(x in nm for x in ["sewerage", "waste"]):            k[i] = 0.93
-        elif any(x in nm for x in ["agricultur", "forestr", "fish"]): k[i] = 0.93
-        elif any(x in nm for x in ["chemical", "pharmaceutical",
-                                    "motor vehicle"]):               k[i] = 0.74
-        elif any(x in nm for x in ["food", "textile", "wood", "paper",
-                                    "rubber", "plastic", "fabricated metal",
-                                    "electrical", "machinery",
-                                    "basic metal"]):                 k[i] = 0.62
-        elif "construct" in nm:                                      k[i] = 0.31
-        elif any(x in nm for x in ["financial", "insurance"]):       k[i] = 0.31
-        elif any(x in nm for x in ["telecommunication",
-                                    "computer programming"]):        k[i] = 0.37
-    return k
+        for keywords, value in mappings:
+            if any(key in nm for key in keywords):
+                k[i] = value
+                break
+    return k 
 
 
 def _v_per_unit(sector_names: List[str]) -> np.ndarray:
@@ -164,6 +198,7 @@ class ModelState:
     c_step:       float         = 0.015
     alpha:        np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_true:   np.ndarray    = field(default_factory=lambda: np.array([]))
+    alpha_macro:  np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_slow:   np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_habit:  np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_bar:    np.ndarray    = field(default_factory=lambda: np.array([]))
@@ -273,22 +308,9 @@ def calibrate(data: dict,
 
     X_real = V / np.maximum(v_per_unit, 1e-12)
 
-    diag_kappa = np.asarray(data["kappa"], dtype=float) if "kappa" in data \
-                 else _kappa(sector_names)
-    diag_kappa = diag_kappa * kappa_factor
-
-    B_diag = sp.diags(diag_kappa, format="csr")
-    rng_cal = np.random.default_rng(42)
-    noise_density = 0.05
-    n_noise = int(n * n * noise_density)
-    rows = rng_cal.integers(0, n, size=n_noise)
-    cols = rng_cal.integers(0, n, size=n_noise)
-    vals = rng_cal.uniform(0.05, 0.25, size=n_noise)
-    B_noise = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
-    B = (B_diag + B_noise).tolil()
-    B.setdiag(diag_kappa)
-    B = B.tocsr()
-    B.eliminate_zeros()
+    # Get structural B-matrix (cached for Monte-Carlo consistency)
+    B = _get_structural_b_matrix(n, sector_names, data)
+    B = B * kappa_factor
 
     A_bar = A + delta * B
     A_bar.eliminate_zeros()
@@ -327,7 +349,7 @@ def calibrate(data: dict,
     dK_0 = term1 + term2
 
     # K_0 is the calibration anchor; firm capitals are derived from it with a 0.5% slack buffer
-    K_0 = 1.0025 * (B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k)))
+    K_0 = B @ np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(C_0 + G_0 + dK_0, dtype=np.float64), neumann_k))
 
     exp = np.where(P_real * C_0 > 0, P_real * C_0, 0.0)
     alpha_0 = exp / max(exp.sum(), 1e-10)
@@ -351,22 +373,17 @@ def calibrate(data: dict,
     B_dense = B.toarray()
     shares = np.abs(np.random.normal(1.0/n_firms, 0.02, n_firms))
     shares /= shares.sum()
-    # Split K_0 across firms using partitioned final demand
+    # Split K_0 across firms using partitioned final demand (Vectorized)
     demand_total = C_0 + G_0 + dK_0
-    X_firm = np.zeros((n, n_firms))
-    K_firms = np.zeros((n_firms, n))
-    B_dense = B.toarray() if hasattr(B, "toarray") else B
     
-    for f in range(n_firms):
-        # F_firm: Target final demand for this specific firm
-        F_firm = shares[f] * demand_total
-        
-        # Invert the input-output relations to get the required gross output
-        X_f_req = np.asarray(CORE.neumann_apply(_to_dense(A_bar), np.asarray(F_firm, dtype=np.float64), neumann_k))
-        
-        # Derive the capital stock needed to support that specific output bundle, including 0.25% slack
-        K_firms[f, :] = 1.0025 * (B_dense @ X_f_req)
-        X_firm[:, f] = X_f_req
+    # Construct a Target Matrix (n, n_firms)
+    F_mat = demand_total[:, None] * shares[None, :]
+    
+    # One batch-call to Julia handles all firms
+    X_firm = np.asarray(CORE.neumann_apply(_to_dense(A_bar), F_mat, neumann_k))
+    
+    # Derive K_firms accordingly
+    K_firms = (B_dense @ X_firm).T
 
     state = ModelState(
         n=n, A=A, A_bar=A_bar, B=B,
@@ -392,6 +409,7 @@ def calibrate(data: dict,
         g_step=float(g_step),
         c_step=float(c_step),
         alpha=alpha_0.copy(), alpha_true=alpha_0.copy(),
+        alpha_macro=alpha_0.copy(),
         alpha_slow=alpha_0.copy(),
         alpha_habit=alpha_0.copy(),
         alpha_bar=alpha_0.copy(),
