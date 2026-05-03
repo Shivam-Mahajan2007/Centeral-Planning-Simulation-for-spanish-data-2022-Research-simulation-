@@ -4,168 +4,119 @@ using Random
 using Printf
 
 # ── Neumann series approximation of (I - A)^{-1} v ─────────────────────────
-function neumann_apply(A_bar, v, k::Int=20)
-    result = copy(v)
-    term   = copy(v)
-    term_next = similar(v)
+mutable struct NeumannCache
+    result::Vector{Float64}
+    term::Vector{Float64}
+    term_next::Vector{Float64}
+    NeumannCache(n::Int) = new(zeros(n), zeros(n), zeros(n))
+end
+
+function neumann_apply!(cache::NeumannCache, A_bar, v, k::Int=20)
+    copyto!(cache.result, v)
+    copyto!(cache.term, v)
     for _ in 1:k
-        mul!(term_next, A_bar, term)
-        result .+= term_next
-        # Swap term and term_next to avoid allocating
-        term, term_next = term_next, term
+        mul!(cache.term_next, A_bar, cache.term)
+        cache.result .+= cache.term_next
+        cache.term, cache.term_next = cache.term_next, cache.term
     end
-    return result
+    return cache.result
 end
 
 # ── Main solver ──────────────────────────────────────────────────────────────
-function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total, G_vec, gamma=nothing, C_prev=nothing;
-                       k::Int=20, tol_p::Float64=1e-3, tol_d::Float64=1e-4, eta_K::Float64=0.4, eta_L::Float64=0.4, max_iter::Int=2000)
+function solve_planner(alpha_v, A_m, B_m, l_tilde_v, dK_v, K_v, L_total_f, G_v, gamma_v=nothing, C_prev_v=nothing;
+                       k::Int=25, tol_p::Float64=1e-3, tol_d::Float64=1e-5, eta_K::Float64=0.2, eta_L::Float64=0.2, max_iter::Int=2000)
 
     eps_val = 1e-15
-    n = length(alpha)
+    n = length(alpha_v)
+    cache = NeumannCache(n)
+    A_m_T = sparse(A_m')
 
-    if gamma === nothing
-        gamma = zeros(n)
-    end
+    if gamma_v === nothing; gamma_v = zeros(n); end
 
-    function Bt(v)
-        return B .* neumann_apply(A_bar, v, k)
-    end
+    Bt(v)  = B_m .* neumann_apply!(cache, A_m, v, k)
+    BtT(w) = neumann_apply!(cache, A_m_T, B_m .* w, k)
 
-    A_bar_T = sparse(A_bar')
-    function BtT(w)
-        return neumann_apply(A_bar_T, B .* w, k)
-    end
+    K_eff = K_v .- Bt(dK_v)
+    L_eff = L_total_f - dot(l_tilde_v, dK_v)
 
-    K_eff = K .- Bt(dK)
-    L_eff = L_total - dot(l_tilde, dK)
-
-    active = K_eff .> eps_val
-    Kv = K_eff[active]
-    alpha_act = alpha[active]
-    gamma_act = gamma[active]
-    l_act = l_tilde[active]
-    n_act = sum(active)
-
-    function Bt_act(v_act)
-        v_full = zeros(n)
-        v_full[active] .= v_act
-        return Bt(v_full)[active]
-    end
-
-    function BtT_act(w_act)
-        w_full = zeros(n)
-        w_full[active] .= w_act
-        return BtT(w_full)[active]
-    end
-
-    if C_prev !== nothing
-        p_guess = alpha_act ./ max.(C_prev[active] .- gamma_act, eps_val)
-        w_guess = zeros(n)
-        w_guess[active] .= p_guess
-        w_res = w_guess .- A_bar_T * w_guess
-        lam_K = max.(w_res[active], eps_val)
-    else
-        lam_K = fill((sum(alpha_act) / n_act) / max((sum(Kv) / n_act), eps_val), n_act)
-        lam_K = max.(lam_K, eps_val)
-    end
-
-    lam_L = (sum(alpha_act) / n_act) / max(L_eff, eps_val)
-
-    log_lam_K = log.(lam_K)
-    log_lam_L = log(lam_L)
+    log_lam_K = log.(max.(BtT(alpha_v ./ max.(K_eff, eps_val)), eps_val))
+    log_lam_L = log(sum(alpha_v) / max(n * L_eff, eps_val))
 
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
 
-    prev_grad_K = zeros(n_act)
-    prev_grad_L = 0.0
-    prev_dtheta_K = zeros(n_act)
-    prev_dtheta_L = 0.0
+    prev_dtheta_K    = zeros(n)
+    prev_dtheta_L    = 0.0
+    prev_grad_K_iter = zeros(n)
+    prev_grad_L_iter = 0.0
 
-    eta_K_cur = eta_K
-    eta_L_cur = eta_L
-
-    C_act = zeros(n_act)
+    C_res     = zeros(n)
     converged = false
-    opt_iter = 0
+    opt_iter  = 0
+    tk_curr   = 1.0
 
-    for it in 1:max_iter
-        opt_iter = it
-        
-        y_K = exp.(log_y_K)
-        y_L = exp(log_y_L)
+    for iter in 1:max_iter
+        opt_iter = iter
+        y_K = exp.(log_y_K); y_L = exp(log_y_L)
+        pi_vec = BtT(y_K) .+ y_L .* l_tilde_v
+        C_res = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
 
-        pi_vec = BtT_act(y_K) .+ y_L .* l_act
-        C_act = gamma_act .+ alpha_act ./ max.(pi_vec, eps_val)
+        s_K = K_eff .- Bt(C_res)
+        s_L = L_eff  - dot(l_tilde_v, C_res)
 
-        s_K = Kv .- Bt_act(C_act)
-        s_L = L_eff - dot(l_act, C_act)
+        # 1. Preconditioning
+        diag_H = (A_m .^ 2)' * (alpha_v ./ max.(pi_vec .^ 2, 1e-6))
+        prec_K = max.(K_eff, 1e-3) .+ 0.1 .* diag_H
+        grad_K_raw = .-s_K
+        grad_L_raw = -s_L
+        grad_K = grad_K_raw ./ prec_K
+        grad_L = grad_L_raw / (abs(L_eff) + eps_val)
 
-        # Primal violations: |slack/constraint| <= tol_p (only for negative slacks)
-        primal_ok_K = all(abs.(min.(0.0, s_K)) ./ (Kv .+ eps_val) .<= tol_p)
-        primal_ok_L = (abs(min(0.0, s_L)) / (abs(L_eff) + eps_val)) <= tol_p
-
-        # Dual complementarity violations: exactly \lambda^(t) * s <= tol_d
-        lam_K_cur = exp.(log_lam_K)
-        lam_L_cur = exp.(log_lam_L)
-        
-        comp_ok_K = all(abs.(lam_K_cur .* s_K) .<= tol_d)
-        comp_ok_L = abs(lam_L_cur * s_L) <= tol_d
-
-        if primal_ok_K && primal_ok_L && comp_ok_K && comp_ok_L
-            converged = true
-            break
+        # 2. Convergence Check
+        lam_K_cur = exp.(log_lam_K); lam_L_cur = exp(log_lam_L)
+        if all(abs.(lam_K_cur .* s_K) .<= tol_d) && abs(lam_L_cur * s_L) <= tol_d
+            converged = true; break
         end
 
-        grad_K = (.-s_K) ./ (Kv .+ eps_val)
-        grad_L = (-s_L) / (abs(L_eff) + eps_val)
-
-        if it > 1
-            dy_K = grad_K .- prev_grad_K
-            dot_ss = dot(prev_dtheta_K, prev_dtheta_K) + prev_dtheta_L^2
-            dot_sg = dot(prev_dtheta_K, dy_K) + prev_dtheta_L * (grad_L - prev_grad_L)
-            if abs(dot_sg) > 1e-30
-                bb_eta = clamp(abs(dot_ss / dot_sg), 0.01, 0.5)
-                eta_K_cur = bb_eta
-                eta_L_cur = bb_eta
+        # 3. Spectral Step
+        bb_eta = 1.0
+        if iter > 1
+            dy_K_raw = grad_K_raw .- prev_grad_K_iter
+            dy_L_raw = grad_L_raw  - prev_grad_L_iter
+            dot_ss = dot(prev_dtheta_K, prec_K .* prev_dtheta_K) + prev_dtheta_L^2 * abs(L_eff)
+            dot_sy = dot(prev_dtheta_K, dy_K_raw) + prev_dtheta_L * dy_L_raw
+            if abs(dot_sy) > 1e-25
+                bb_eta = 1.0 / (1.0 + abs(dot_sy / dot_ss))
             end
         end
 
-        prev_grad_K .= grad_K
-        prev_grad_L = grad_L
+        copyto!(prev_grad_K_iter, grad_K_raw)
+        prev_grad_L_iter = grad_L_raw
 
-        step_K = eta_K_cur .* grad_K
-        step_L = eta_L_cur * grad_L
-
-        prev_dtheta_K .= step_K
+        step_K = bb_eta .* grad_K
+        step_L = bb_eta * grad_L
+        copyto!(prev_dtheta_K, step_K)
         prev_dtheta_L = step_L
 
         log_lam_K_new = log_y_K .+ step_K
-        log_lam_L_new = log_y_L + step_L
+        log_lam_L_new = log_y_L  + step_L
+        tk_next = (1.0 + sqrt(1.0 + 4.0 * tk_curr^2)) / 2.0
+        beta_t  = (tk_curr - 1.0) / tk_next
+        tk_curr = tk_next
 
-        # Nesterov momentum update
-        beta_t = (it - 1.0) / (it + 2.0)
-        log_y_K = log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
-        log_y_L = log_lam_L_new + beta_t * (log_lam_L_new - log_lam_L)
-
+        log_y_K .= log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
+        log_y_L  = log_lam_L_new  + beta_t  * (log_lam_L_new  - log_lam_L)
         log_lam_K .= log_lam_K_new
-        log_lam_L = log_lam_L_new
+        log_lam_L  = log_lam_L_new
     end
-    
+
     lam_K = exp.(log_lam_K)
     lam_L = exp(log_lam_L)
+    pi_star = BtT(lam_K) .+ lam_L .* l_tilde_v
+    X_star = neumann_apply!(cache, A_m, C_res .+ dK_v .+ G_v, k)
 
-    lam_K_full = zeros(n)
-    lam_K_full[active] .= lam_K
-    pi_star = BtT(lam_K_full) .+ lam_L .* l_tilde
-
-    C_star = zeros(n)
-    C_star[active] .= C_act
-    X_star = neumann_apply(A_bar, C_star .+ dK .+ G_vec, k)
-
-    return (C_star=C_star, X_star=X_star, pi_star=pi_star,
-            success=converged, lambda_K=lam_K_full, lambda_L=lam_L,
+    return (C_star=C_res, X_star=X_star, pi_star=pi_star,
+            success=converged, lambda_K=lam_K, lambda_L=lam_L,
             iterations=opt_iter)
 end
 

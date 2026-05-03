@@ -6,10 +6,15 @@ Includes diagnostic plots for Alpha Gap, Price Drift, and Iterations.
 """
 
 import os
+# Mitigate segfaults by handling Julia/Python signal collisions
+os.environ["PYTHON_JULIACALL_HANDLE_SIGNALS"] = "yes"
+
 import json
 import logging
 import time
 import numpy as np
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend to prevent thread-safety crashes
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
