@@ -232,10 +232,11 @@ def run_quarter(state: ModelState) -> ModelState:
         state.CPI_chained = 1.0
 
     opt_iter = opt.get("iterations", -1)
+    opt_mvps = opt.get("mvps", -1)
     logger.info(f"   C* = {(P_new * C_star).sum()/1e9:.1f} B EUR  "
                 f"X_actual = {(P_new * X_actual).sum()/1e9:.1f} B EUR  "
                 f"(X* target: {(P_new * X_star).sum()/1e9:.1f} B EUR)  "
-                f"{'(OK)' if opt['success'] else '(WARNING)'}  ({opt_iter} iters)")
+                f"{'(OK)' if opt['success'] else '(WARNING)'}  ({opt_iter} iters, {opt_mvps} MVPs)")
     logger.info(f"   Y_firm = {Y/1e9:.2f} B EUR  Y_planner = {Y_planner/1e9:.2f} B EUR  "
                 f"(gap = {abs(Y - Y_planner)/max(Y, 1e-30)*100:.3f}%)")
 

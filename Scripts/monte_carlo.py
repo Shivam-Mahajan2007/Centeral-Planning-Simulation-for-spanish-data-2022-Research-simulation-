@@ -82,7 +82,7 @@ class TrajectoryCollector:
         self.cap_slack = np.full((n_runs, n_q), np.nan)
         self.alpha_gap = np.full((n_runs, n_q), np.nan)
         self.price_drift = np.full((n_runs, n_q), np.nan)
-        self.iterations = [] # Flat list for histogram
+        self.mvps = [] # Flat list for histogram
 
     def add_run(self, idx, history):
         if not isinstance(history, list): return
@@ -94,7 +94,7 @@ class TrajectoryCollector:
             self.gdp_level[idx, q]  = (h["GDP"] / gdp_q1) * 100.0
             self.alpha_gap[idx, q]  = h.get("alpha_gap", 0.0) * 100.0 # to %
             self.price_drift[idx, q] = h.get("price_drift", 0.0) * 100.0 # to %
-            self.iterations.append(h.get("iterations", 0))
+            self.mvps.append(h.get("mvps", h.get("iterations", 0) * 2))
 
 class ProfessionalPlotter:
     def __init__(self, out_dir):
@@ -175,7 +175,7 @@ def run_ensemble():
                 plotter.plot_fan(collector.cap_slack, "Capital Capacity Slack", "Unused (%)", "capital_slack")
                 plotter.plot_fan(collector.alpha_gap, "Alpha Tracking Error (Gap)", "Error (%)", "alpha_gap")
                 plotter.plot_fan(collector.price_drift, "Price Drift (RMS)", "Drift (%)", "price_drift")
-                plotter.plot_hist(collector.iterations, "Solver Iterations", "Iterations", "iterations")
+                plotter.plot_hist(collector.mvps, "Computational Effort", "Matrix-Vector Operations", "mvps")
 
         except Exception as e:
             print(f"  Run {i+1} failed: {e}")
@@ -186,7 +186,7 @@ def run_ensemble():
     plotter.plot_fan(collector.cap_slack, "Capital Capacity Slack", "Unused (%)", "capital_slack")
     plotter.plot_fan(collector.alpha_gap, "Alpha Tracking Error (Gap)", "Error (%)", "alpha_gap")
     plotter.plot_fan(collector.price_drift, "Price Drift (RMS)", "Drift (%)", "price_drift")
-    plotter.plot_hist(collector.iterations, "Solver Iterations", "Iterations", "iterations")
+    plotter.plot_hist(collector.mvps, "Computational Effort", "Matrix-Vector Operations", "mvps")
     
     print(f"\nMonte-Carlo complete. Success: {collector.success_count}/{n_runs}")
 

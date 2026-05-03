@@ -24,7 +24,7 @@ from plots import (
     plot_shadow_price_index, plot_cybernetic_signals,
     plot_real_income_index, plot_labor_productivity,
     plot_growth_targets, plot_excess_demand,
-    plot_inflation, plot_investment_gdp_ratio, plot_iterations,
+    plot_inflation, plot_investment_gdp_ratio, plot_mvps,
     plot_firm_income_distribution
 )
 
@@ -174,7 +174,7 @@ def main():
     plot_excess_demand(state.history, r / "16_excess_demand.png")
     plot_inflation(state.history, r / "17_inflation.png")
     plot_investment_gdp_ratio(state.history, r / "18_investment_gdp_ratio.png")
-    plot_iterations(state.history, r / "19_iterations.png")
+    plot_mvps(state.history, r / "19_mvps.png")
     plot_firm_income_distribution(state.history, state.n, r / "20_firm_income.png")
 
     logger.info("\nAll charts and analysis saved to ./Results/")

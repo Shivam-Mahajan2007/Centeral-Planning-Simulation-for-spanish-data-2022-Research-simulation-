@@ -140,128 +140,80 @@ function solve_planner_native(alpha_v::Vector{Float64},
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
 
-    # Pre-allocate iteration variables for the full N-sector space
-    prev_dtheta_K    = zeros(n)
-    prev_dtheta_L    = 0.0
-    prev_grad_K_iter = zeros(n)
-    prev_grad_L_iter = 0.0
+    # --- FISTA in log-space (Multiplicative Dual Ascent) ---
+    # Gradient step always taken from the extrapolated point y (not x).
+    # Fixed step sizes eta_K / eta_L required for FISTA convergence guarantee.
+    log_x_K = copy(log_lam_K); log_x_L = log_lam_L
+    tk_curr = 1.0
 
-    eta_K_cur = eta_K
-    eta_L_cur = eta_L
-
-    C_res     = zeros(n)
     converged = false
-    opt_iter  = 0
-    tk_curr   = 1.0
-    log_lam_K_old = copy(log_lam_K)
-    log_lam_L_old = log_lam_L
+    opt_iter  = max_iter
 
     for iter in 1:max_iter
         opt_iter = iter
 
-        y_K    = exp.(log_y_K)
-        y_L    = exp(log_y_L)
+        # --- Evaluate at extrapolated point y ---
+        y_K    = exp.(log_y_K); y_L = exp(log_y_L)
         pi_vec = BtT(y_K) .+ y_L .* l_tilde_v
         C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
 
-        # s_K / grad_K at Nesterov point — used for the gradient step only
         s_K = K_eff .- Bt(C_res)
         s_L = L_eff  - dot(l_tilde_v, C_res)
 
-        # 1. Sector-Specific Preconditioning (Jacobi Diagonal)
-        # We cap the curvature term to prevent numerical blowup in sectors with low prices.
-        diag_H = (B_m .^ 2)' * (alpha_v ./ max.(pi_vec .^ 2, 1e-6))
-        prec_K = max.(K_eff, 1e-3) .+ 0.1 .* diag_H
-        
-        grad_K_raw = .-s_K
-        grad_L_raw = -s_L
-        
-        grad_K = grad_K_raw ./ prec_K
-        grad_L = grad_L_raw / (abs(L_eff) + eps_val)
+        # log-space gradient: g = -s/K
+        grad_K = .-s_K ./ max.(K_eff, 1e-12)
+        grad_L = -s_L / max(abs(L_total_f), 1e-12)
 
-        # 2. KKT Convergence Check
-        lam_K_cur  = exp.(log_lam_K)
-        lam_L_cur  = exp(log_lam_L)
-        pi_chk     = BtT(lam_K_cur) .+ lam_L_cur .* l_tilde_v
-        C_chk      = gamma_v .+ alpha_v ./ max.(pi_chk, eps_val)
-        s_K_chk    = K_eff .- Bt(C_chk)
-        s_L_chk    = L_eff  - dot(l_tilde_v, C_chk)
+        # KKT convergence check
+        if all(abs.(y_K .* s_K) .<= tol_d) && abs(y_L * s_L) <= tol_d &&
+           all(abs.(min.(0.0, s_K)) ./ (max.(K_eff, eps_val)) .<= tol_p) &&
+           (abs(min(0.0, s_L)) / (abs(L_eff) + eps_val)) <= tol_p
+            converged = true; break
+        end
 
-        # User specified: Lam_k,i * s_k,i < 1e-5
-        comp_ok_K   = all(abs.(lam_K_cur .* s_K_chk) .<= tol_d)
-        comp_ok_L   = abs(lam_L_cur * s_L_chk) <= tol_d
-        primal_ok_K = all(abs.(min.(0.0, s_K_chk)) ./ (max.(K_eff, eps_val)) .<= tol_p)
-        primal_ok_L = (abs(min(0.0, s_L_chk)) / (abs(L_eff) + eps_val)) <= tol_p
- 
-        if comp_ok_K && comp_ok_L && primal_ok_K && primal_ok_L
-            converged = true
+        if any(isnan, grad_K) || isnan(grad_L)
+            println("   [CRITICAL] FISTA: NaNs at iteration $iter")
             break
         end
 
-        # 3. Preconditioned Spectral Step (PBB)
-        # Using raw gradient differences (dy_raw) to estimate curvature accurately.
-        bb_eta = 1.0
-        if iter > 1
-            dy_K_raw = grad_K_raw .- prev_grad_K_iter
-            dy_L_raw = grad_L_raw  - prev_grad_L_iter
-            
-            # BB formula in preconditioned space: η = (s' P s) / (s' y)
-            # where s is the change in λ and y is the change in raw gradient g.
-            dot_ss = dot(prev_dtheta_K, prec_K .* prev_dtheta_K) + prev_dtheta_L^2 * abs(L_eff)
-            dot_sy = dot(prev_dtheta_K, dy_K_raw) + prev_dtheta_L * dy_L_raw
-            
-            if abs(dot_sy) > 1e-25
-                gamma_spec = abs(dot_sy / dot_ss)
-                bb_eta     = 1.0 / (1.0 + gamma_spec) 
-            end
+        # --- FISTA step 1: gradient step from y → x_new (User step sizes 0.4 / 0.5) ---
+        eK = 0.4; eL = 0.5
+        log_x_K_new = log_y_K .+ eK .* grad_K
+        log_x_L_new = log_y_L  + eL  * grad_L
+
+        # --- Adaptive Momentum Restart (Zero added MVPs) ---
+        # Restart if the direction (y - x) is opposed to the gradient signal.
+        if dot(log_y_K .- log_x_K, grad_K) + (log_y_L - log_x_L) * grad_L < 0
+            tk_curr = 1.0
         end
 
-        copyto!(prev_grad_K_iter, grad_K_raw) # Track RAW gradient for next iter
-        prev_grad_L_iter = grad_L_raw
-
-        step_K = bb_eta .* grad_K
-        step_L = bb_eta * grad_L
-
-        copyto!(prev_dtheta_K, step_K)
-        prev_dtheta_L = step_L
-
-        log_lam_K_new = log_y_K .+ step_K
-        log_lam_L_new = log_y_L  + step_L
-
-        # tk update
+        # --- FISTA step 2: momentum extrapolation from x_new and x_old → y_new ---
         tk_next = (1.0 + sqrt(1.0 + 4.0 * tk_curr^2)) / 2.0
         beta_t  = (tk_curr - 1.0) / tk_next
-        tk_curr = tk_next
 
-        # Extrapolation
-        log_y_K .= log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
-        log_y_L  = log_lam_L_new  + beta_t  * (log_lam_L_new  - log_lam_L)
+        log_y_K .= log_x_K_new .+ beta_t .* (log_x_K_new .- log_x_K)
+        log_y_L  = log_x_L_new  + beta_t  * (log_x_L_new  - log_x_L)
 
-        # Iterate update
-        log_lam_K .= log_lam_K_new
-        log_lam_L  = log_lam_L_new
-
-        if any(isnan, log_lam_K) || isnan(log_lam_L)
-            println("   [CRITICAL] solve_planner: NaNs detected at iteration $iter")
-            converged = false
-            break
-        end
+        log_x_K .= log_x_K_new
+        log_x_L  = log_x_L_new
+        tk_curr  = tk_next
     end
 
-    lam_K = exp.(log_lam_K)
-    lam_L = exp(log_lam_L)
-
+    lam_K       = exp.(log_x_K)
+    lam_L       = exp(log_x_L)
     pi_vec_star = BtT(lam_K) .+ lam_L .* l_tilde_v
-    X_star      = neumann_apply!(cache, A_m, C_res .+ dK_v .+ G_v, k)
+    C_star      = gamma_v .+ alpha_v ./ max.(pi_vec_star, eps_val)
+    X_star      = neumann_apply!(cache, A_m, C_star .+ dK_v .+ G_v, k)
 
     return (
-        C_star     = C_res,
+        C_star     = C_star,
         X_star     = X_star,
         pi_star    = pi_vec_star,
         success    = converged,
         lambda_K   = lam_K,
         lambda_L   = lam_L,
-        iterations = opt_iter
+        iterations = opt_iter,
+        mvps       = opt_iter * 2 # Standard FISTA uses 2 MVPs (Bt, BtT) per step
     )
 end
 

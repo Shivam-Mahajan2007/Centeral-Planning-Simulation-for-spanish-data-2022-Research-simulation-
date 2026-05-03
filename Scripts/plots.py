@@ -436,27 +436,28 @@ def plot_firm_income_distribution(hist, n, out_path):
     savefig(fig, out_path)
 
 
-def plot_iterations(history, save_path):
+def plot_mvps(history, save_path):
     import matplotlib.pyplot as plt
     ts    = np.arange(len(history))
     ql    = qlabels(len(history))
-    iters = np.array([h.get("iterations", 0) for h in history])
+    mvps  = np.array([h.get("mvps", h.get("iterations", 0) * 2) for h in history])
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(ts, iters, color="#8e44ad", alpha=0.7)
-    if len(iters) >= 4:
-        window_size = min(4, len(iters))
+    ax.bar(ts, mvps, color="#8e44ad", alpha=0.7)
+    if len(mvps) >= 4:
+        window_size = min(4, len(mvps))
         weights     = np.repeat(1.0, window_size) / window_size
-        sma         = np.convolve(iters, weights, 'valid')
+        sma         = np.convolve(mvps, weights, 'valid')
         ax.plot(ts[window_size-1:], sma, color="#2980b9", lw=2,
                 label=f"{window_size}-Qtr Moving Average")
         ax.legend()
-    max_iter_mask = iters >= 2000
-    if np.any(max_iter_mask):
-        ax.scatter(ts[max_iter_mask], iters[max_iter_mask], color='red',
-                   s=100, zorder=5, label="Max Iterations Reached")
+    # Assuming previous max_iter 2000 => 4000 MVPs
+    max_mvp_mask = mvps >= 4000
+    if np.any(max_mvp_mask):
+        ax.scatter(ts[max_mvp_mask], mvps[max_mvp_mask], color='red',
+                   s=100, zorder=5, label="Max Limit Reached")
         ax.legend()
-    ax.set_title("Solver Iterations per Quarter")
-    ax.set_ylabel("Number of Iterations")
+    ax.set_title("Computational Effort: Matrix-Vector Operations per Quarter")
+    ax.set_ylabel("Matrix-Vector Operations (MVPs)")
     ax.grid(axis='y', alpha=0.3)
     _xticks(ax, ts, ql)
     fig.tight_layout()
