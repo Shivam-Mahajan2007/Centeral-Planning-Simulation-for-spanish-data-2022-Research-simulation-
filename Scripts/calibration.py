@@ -189,6 +189,7 @@ class ModelState:
     habit_persistence: float
     sector_names: List[str]
     sector_short: List[str]
+    cybernetic_k_sigma: float
     # Dynamic state
     t:            int
     K:            np.ndarray      # (N,) accounting aggregate = K_firms.sum(axis=0)
@@ -255,6 +256,7 @@ def calibrate(data: dict,
               labor_mult:   float = 1.0,
               primal_tol:   float = 1e-3,
               dual_tol:     float = 1e-4,
+              cybernetic_k_sigma: float = 1.0,
               eta_K:        float = 0.15,
               eta_L:        float = 0.15,
               max_iter:     int   = 2000,
@@ -397,6 +399,7 @@ def calibrate(data: dict,
         wage_rate=wage_rate,
         neumann_k=neumann_k,
         primal_tol=primal_tol, dual_tol=dual_tol,
+        cybernetic_k_sigma=cybernetic_k_sigma,
         eta_K=eta_K, eta_L=eta_L, max_iter=max_iter,
         inflation_target=inflation_target,
         habit_persistence=habit_persistence,

@@ -78,18 +78,23 @@ def solve_planner(alpha, A, B, l_tilde, dK, K, L_total, G_vec, gamma, C_prev,
     }
 
 def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
-              drift_rho, drift_sigma, noise_sigma, Y, gamma, K_v,
+              drift_rho, drift_sigma, noise_sigma, Y, gamma, K_v, A_bar, B,
               theta_drift=0.1,
               alpha_h=None, gamma_h=None, Y_h=None,
               alpha_slow_h=None,
               price_tol=0.005,
-              max_price_iter=25):
+              max_price_iter=25,
+              k_sigma=1.0,
+              neumann_k=20,
+              rho_M=None):
     pb_jl = np.asarray(P_base,    dtype=np.float64)
     cp_jl = np.asarray(C_plan,    dtype=np.float64)
     at_jl = np.asarray(alpha_true, dtype=np.float64)
     as_jl = np.asarray(alpha_slow, dtype=np.float64)
     ga_jl = np.asarray(gamma,      dtype=np.float64)
     kv_jl = np.asarray(K_v,        dtype=np.float64)
+    ab_jl = _to_dense(A_bar)
+    b_jl  = _to_dense(B)
     
     seed   = int(rng.integers(0, 2**32))
     jl_rng = jl.Random.MersenneTwister(seed)
@@ -103,13 +108,17 @@ def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
     if alpha_slow_h is not None:
         hh_kwargs["alpha_slow_h"] = np.asarray(alpha_slow_h, dtype=np.float64)
 
+    rm_jl = float(rho_M) if rho_M is not None else -1.0
     res = CORE.fast_loop(
         pb_jl, cp_jl, at_jl, as_jl, jl_rng,
         float(drift_rho), float(drift_sigma), float(noise_sigma),
-        float(Y), ga_jl, kv_jl, 3,
+        float(Y), ga_jl, kv_jl, ab_jl, b_jl, 3,
         theta_drift=float(theta_drift),
         price_tol=float(price_tol),
         max_price_iter=int(max_price_iter),
+        k_sigma=float(k_sigma),
+        neumann_k=int(neumann_k),
+        rho_M_in=rm_jl,
         **hh_kwargs
     )
     return {
@@ -125,6 +134,7 @@ def fast_loop(P_base, C_plan, alpha_true, alpha_slow, rng,
         "G_hat_bare":       np.asarray(res.G_hat_bare),
         "alpha_h_final":    np.asarray(res.alpha_h_final),
         "alpha_macro_final": np.asarray(res.alpha_macro_final),
+        "rho_M":            float(res.rho_M),
     }
 
 

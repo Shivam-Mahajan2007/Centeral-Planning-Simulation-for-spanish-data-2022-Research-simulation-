@@ -258,14 +258,17 @@ def run_quarter(state: ModelState) -> ModelState:
     fast_res = fast_loop(
         P_new, C_actual, state.alpha_macro, state.alpha_slow, state.rng,
         state.pref_drift_rho, state.pref_drift_sigma, state.pref_noise_sigma,
-        Y, state.gamma, K_eff,
+        Y, state.gamma, K_eff, state.A_bar, state.B,
         theta_drift=state.theta_drift,
         alpha_h=state.alpha_true_h,
         gamma_h=state.gamma_h,
         Y_h=Y_h,
         alpha_slow_h=state.alpha_slow_h,
         price_tol=state.price_tol,
-        max_price_iter=state.max_price_iter
+        max_price_iter=state.max_price_iter,
+        k_sigma=state.cybernetic_k_sigma,
+        neumann_k=state.neumann_k,
+        rho_M=getattr(state, 'rho_M', None)
     )
 
     t_post_fast_loop = time.time()
@@ -295,6 +298,7 @@ def run_quarter(state: ModelState) -> ModelState:
     state.P_monthly = fast_res["P_monthly"]
     state.price_drift = fast_res["price_drift"]
     state.alpha_macro = fast_res["alpha_macro_final"]
+    state.rho_M       = fast_res["rho_M"]
 
     # Planner alpha update: Smoothed move toward revealed preferences + epsilon floor
     alpha_new  = np.array(fast_res["alpha_true_final"]).copy()

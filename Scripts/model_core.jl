@@ -140,9 +140,6 @@ function solve_planner_native(alpha_v::Vector{Float64},
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
 
-    log_y_K = copy(log_lam_K)
-    log_y_L = log_lam_L
-
     # Pre-allocate iteration variables for the full N-sector space
     prev_dtheta_K    = zeros(n)
     prev_dtheta_L    = 0.0
@@ -243,6 +240,12 @@ function solve_planner_native(alpha_v::Vector{Float64},
         # Iterate update
         log_lam_K .= log_lam_K_new
         log_lam_L  = log_lam_L_new
+
+        if any(isnan, log_lam_K) || isnan(log_lam_L)
+            println("   [CRITICAL] solve_planner: NaNs detected at iteration $iter")
+            converged = false
+            break
+        end
     end
 
     lam_K = exp.(log_lam_K)
@@ -290,6 +293,8 @@ function fast_loop_native(P_base_v::Vector{Float64},
                           Y_f::Float64,
                           gamma_v::Vector{Float64},
                           K_v_vec::Vector{Float64},
+                          A_bar_m::Matrix{Float64},
+                          B_m::Matrix{Float64},
                           n_months::Int=3;
                           theta_drift::Float64=0.1,
                           max_price_iter::Int=50,
@@ -298,7 +303,10 @@ function fast_loop_native(P_base_v::Vector{Float64},
                           alpha_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
                           gamma_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
                           Y_h::Union{Nothing, AbstractVector{Float64}}=nothing,
-                          alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing)
+                          alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
+                          k_sigma::Float64=1.0,
+                          neumann_k::Int=20,
+                          rho_M_in::Float64=-1.0)
 
     multi_hh  = !isnothing(alpha_h) && !isnothing(gamma_h) && !isnothing(Y_h)
     n_h_count = multi_hh ? size(alpha_h, 1) : 0
@@ -337,6 +345,37 @@ function fast_loop_native(P_base_v::Vector{Float64},
     if multi_hh
         hh_shocks_drift = randn(rng, n_months, n_h_count, n) .* drift_sigma
         hh_shocks_noise = randn(rng, n_months, n_h_count, n) .* noise_sigma
+    end
+
+    rho_M = rho_M_in
+    if rho_M < 0.0
+        x_pi = rand(rng, n)    # Start with strictly positive random vector (Perron-Frobenius)
+        x_pi_norm = norm(x_pi)
+        if x_pi_norm > 1e-12
+            x_pi ./= x_pi_norm
+            cache_pi = NeumannCache(n)
+            for _ in 1:100     # Allow enough iterations to reach the tighter tolerance
+                y_pi = B_m * neumann_apply!(cache_pi, A_bar_m, x_pi, neumann_k)
+                
+                g_vec  = y_pi ./ max.(x_pi, 1e-16)
+                g_mean = mean(g_vec)
+                g_mad  = mean(abs.(g_vec .- g_mean))
+                rmad   = g_mean > 1e-16 ? g_mad / g_mean : 1.0
+                
+                rho_M  = g_mean
+                
+                if rmad <= 0.01
+                    break
+                end
+                
+                nrm = norm(y_pi)
+                if nrm > 1e-12
+                    x_pi .= y_pi ./ nrm
+                else
+                    break
+                end
+            end
+        end
     end
 
     for tau in 1:n_months
@@ -405,10 +444,10 @@ function fast_loop_native(P_base_v::Vector{Float64},
 
         a_reveal_sum .+= (P_clear .* (C_d .- gamma_m)) ./ max(resid_Y_star, 1e-30)
 
-        eps_avg   = mean(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f))
-        eps_final = min(eps_avg, -1e-4)
+        eps_i     = abs.(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f))
         delta_p   = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
-        signal    = clamp.(eps_final .* delta_p, -0.05, 0.0)
+        val       = eps_i .* delta_p
+        signal    = .-clamp.(val, 0.0, 1.0 / (rho_M + 1.0))
         denom_sig = 1.0 .+ signal
         C_hat_sum .+= C_m ./ denom_sig
 
@@ -443,13 +482,14 @@ function fast_loop_native(P_base_v::Vector{Float64},
         alpha_noise_final = zeros(n),
         alpha_h_final    = multi_hh ? alpha_h_ev : zeros(0, 0),
         alpha_macro_final = a_f,
+        rho_M            = rho_M,
     )
 end
 
 function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
                    rng::AbstractRNG,
                    drift_rho::Real, drift_sigma::Real, noise_sigma::Real,
-                   Y::Real, gamma, K_v, n_months::Int=3;
+                   Y::Real, gamma, K_v, A_bar, B, n_months::Int=3;
                    theta_drift::Float64=0.1,
                    max_price_iter::Int=50,
                    price_tol::Float64=0.005,
@@ -457,13 +497,16 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
                    alpha_h=nothing,
                    gamma_h=nothing,
                    Y_h=nothing,
-                   alpha_slow_h=nothing)
+                   alpha_slow_h=nothing,
+                   k_sigma::Float64=1.0,
+                   neumann_k::Int=20,
+                   rho_M_in::Float64=-1.0)
 
     fast_loop_native(
         _v(P_base), _v(C_plan), _v(alpha_true_start), _v(alpha_slow),
         rng,
         Float64(drift_rho), Float64(drift_sigma), Float64(noise_sigma),
-        Float64(Y), _v(gamma), _v(K_v), n_months;
+        Float64(Y), _v(gamma), _v(K_v), _m(A_bar), _m(B), n_months;
         theta_drift=theta_drift,
         max_price_iter=max_price_iter,
         price_tol=price_tol,
@@ -471,7 +514,10 @@ function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
         alpha_h = isnothing(alpha_h) ? nothing : _m(alpha_h),
         gamma_h = isnothing(gamma_h) ? nothing : _m(gamma_h),
         Y_h = isnothing(Y_h) ? nothing : _v(Y_h),
-        alpha_slow_h = isnothing(alpha_slow_h) ? nothing : _m(alpha_slow_h))
+        alpha_slow_h = isnothing(alpha_slow_h) ? nothing : _m(alpha_slow_h),
+        k_sigma=k_sigma,
+        neumann_k=neumann_k,
+        rho_M_in=rho_M_in)
 end
 
 const FIRM_SOLVER_CACHE = Dict{Int, Any}()
@@ -547,7 +593,7 @@ if VERSION >= v"1.9"
     # Using precompile() is more efficient than a let block for loading speed.
     precompile(neumann_apply!, (NeumannCache, Matrix{Float64}, Vector{Float64}, Int))
     precompile(solve_planner_native, (Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, Float64, Vector{Float64}, Vector{Float64}, Vector{Float64}))
-    precompile(fast_loop_native, (Vector{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, MersenneTwister, Float64, Float64, Float64, Float64, Vector{Float64}, Vector{Float64}, Int))
+    precompile(fast_loop_native, (Vector{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, MersenneTwister, Float64, Float64, Float64, Float64, Vector{Float64}, Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Int))
 end
 
 end  # module ModelCore

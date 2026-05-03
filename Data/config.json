@@ -2,6 +2,7 @@
     "//": "Cybernetic In-Kind Planning Simulation - Configuration",
     "//_Simulation_Scope": "--------------------------------------------------",
     "n_quarters": 20,
+    "n_runs": 250,
     "rng_seed": null,
     "checkpoint_every": 4,
     "neumann_k": 25,
@@ -25,6 +26,7 @@
     "n_households": 1000,
     "n_firms": 250,
     "hh_dispersion": 0.05,
+    "cybernetic_k_sigma": 1.0,
     "//_Documentation": {
         "n_quarters": "Number of simulation steps (quarters).",
         "rng_seed": "Seed for reproducibility of preference shocks.",

@@ -64,11 +64,13 @@ class EnsembleConfig:
             "dual_tol": 1e-5,
             "eta_K": 0.2,
             "eta_L": 0.15,
-            "max_iter": 2000
+            "max_iter": 2000,
+            "cybernetic_k_sigma": 1.0
         }
 
     def get(self, key):
-        return self.config.get(key, self.defaults.get(key))
+        val = self.config.get(key, self.defaults.get(key))
+        return val
 
 class TrajectoryCollector:
     def __init__(self, n_runs, n_q):
@@ -146,6 +148,7 @@ def run_ensemble():
     out_dir = f"Results/MonteCarlo/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     print(f"Starting Sequential Monte-Carlo: {n_runs} runs.")
+    print(f"Parameters: { {k:v for k,v in config_params.items() if v is not None} }")
     print(f"Diagnostics: GDP, Inflation, Slack, Alpha Gap, Price Drift, Iterations.")
     print(f"Results will save periodically to {out_dir}\n")
     

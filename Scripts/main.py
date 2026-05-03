@@ -44,6 +44,7 @@ config = {
     "eta_L": 0.15,
     "max_iter": 2000,
     "slim_history": None,
+    "cybernetic_k_sigma": 1.0,
 }
 
 DATA_DIR    = Path(__file__).parent.parent / "Data"
@@ -99,9 +100,9 @@ def main():
         slim_history=config.get("slim_history", None),
         n_households=config.get("n_households", 1000),
         hh_dispersion=config.get("hh_dispersion", 0.05),
-        n_firms=config.get("n_firms", 250),
-        price_tol=config.get("price_tol", 0.0),
         max_price_iter=config.get("max_price_iter", 8),
+        n_firms=config.get("n_firms", 250),
+        cybernetic_k_sigma=config.get("cybernetic_k_sigma", 1.0)
     )
     if "rng_seed" in config and config["rng_seed"] is not None:
         state.rng = np.random.default_rng(config["rng_seed"])

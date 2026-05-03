@@ -18,9 +18,9 @@ Thumbs.db
 
 # ── Julia ──
 *.so
+*.toml
+*sysimage*
 _precompile_exec.jl
 Scripts/__pycache__/
 
-# ── Simulation outputs ──
-Results
-Data/.data_cache.pkl
+
