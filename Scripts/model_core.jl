@@ -539,15 +539,15 @@ function run_montecarlo(n_runs::Int, run_one_fn::Function; kwargs...)
     return results
 end
 
-let
-    n_pre = 2
-    A_pre = rand(n_pre, n_pre); B_pre = rand(n_pre, n_pre); v_pre = rand(n_pre)
-    K_pre = rand(n_pre); C_pre = rand(n_pre); G_pre = rand(n_pre)
-    a_pre = rand(n_pre); a_pre ./= sum(a_pre); l_pre = rand(n_pre); ga_pre = zeros(n_pre)
-    compute_investment_native(a_pre, A_pre, B_pre, C_pre, G_pre, 0.01, 0.01, k=2)
-    solve_planner_native(a_pre, A_pre, B_pre, l_pre, v_pre, K_pre, 10.0, G_pre, ga_pre, C_pre, max_iter=5)
-    fast_loop_native(v_pre, C_pre, a_pre, a_pre, MersenneTwister(42), 0.9, 0.01, 0.01, 10.0, ga_pre, K_pre, 1)
-    solve_firm_lp(v_pre, B_pre, rand(2, n_pre), v_pre, 0.01)
+
+# --- Precompilation Hints ---
+# These hints help Julia's JIT generator prepare machine code for the 
+# specific argument types used in our simulation, reducing first-run latency.
+if VERSION >= v"1.9"
+    # Using precompile() is more efficient than a let block for loading speed.
+    precompile(neumann_apply!, (NeumannCache, Matrix{Float64}, Vector{Float64}, Int))
+    precompile(solve_planner_native, (Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, Float64, Vector{Float64}, Vector{Float64}, Vector{Float64}))
+    precompile(fast_loop_native, (Vector{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, MersenneTwister, Float64, Float64, Float64, Float64, Vector{Float64}, Vector{Float64}, Int))
 end
 
 end  # module ModelCore

@@ -429,10 +429,10 @@ def plot_firm_income_distribution(hist, n, out_path):
     ax.set_ylabel("Number of Firms")
     ax.grid(axis='y', alpha=0.3)
     
-    # Use standard notation for large numbers if needed, but xlabel is in EUR
+    # Use scientific notation for readability of large Euro values
     import matplotlib.ticker as ticker
-    ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
-    plt.xticks(rotation=15)
+    ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%.1e'))
+    plt.xticks(rotation=0)
     
     plt.tight_layout()
     savefig(fig, out_path)

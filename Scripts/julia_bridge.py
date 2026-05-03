@@ -1,10 +1,16 @@
 import os
+from pathlib import Path
+# Performance Optimization: Load pre-compiled Sysimage if available
+SCRIPTS_DIR = Path(__file__).parent
+SYSIMAGE_PATH = SCRIPTS_DIR / "sysimage.so"
+if SYSIMAGE_PATH.exists():
+    os.environ["PYTHON_JULIACALL_SYSIMAGE"] = str(SYSIMAGE_PATH)
+
 os.environ["PYTHON_JULIACALL_THREADS"] = "auto"
 os.environ["PYTHON_JULIACALL_HANDLE_SIGNALS"] = "yes"
 
 import numpy as np
 import logging
-from pathlib import Path
 import scipy.sparse as sp
 
 logger = logging.getLogger(__name__)

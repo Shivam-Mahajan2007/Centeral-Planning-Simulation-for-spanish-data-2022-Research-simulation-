@@ -17,10 +17,10 @@ env/
 Thumbs.db
 
 # ── Julia ──
-*.so                        # compiled system image (build_sysimage.jl output)
-_precompile_exec.jl         # temp file auto-created and deleted by build_sysimage.jl
-Scripts/__pycache__/        # Julia bytecode cache written by juliacall
+*.so
+_precompile_exec.jl
+Scripts/__pycache__/
 
 # ── Simulation outputs ──
-Results/                    # generated charts, PDFs, checkpoints — often large
-Data/.data_cache.pkl        # cached parsed spreadsheet data, regenerates automatically
+Results
+Data/.data_cache.pkl
