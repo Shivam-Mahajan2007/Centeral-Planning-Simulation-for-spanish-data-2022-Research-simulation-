@@ -1,5 +1,6 @@
 import os
 os.environ["PYTHON_JULIACALL_THREADS"] = "auto"
+os.environ["PYTHON_JULIACALL_HANDLE_SIGNALS"] = "yes"
 
 import numpy as np
 import logging

@@ -129,9 +129,6 @@ function solve_planner_native(alpha_v::Vector{Float64},
 
     K_eff = K_v .- Bt(dK_v)
     L_eff = L_total_f - dot(l_tilde_v, dK_v)
-    B_sq  = B_m .^ 2
-    l_tilde_sq = l_tilde_v .^ 2
-
     # Cold-start duals: π₀ = α / max(C_prev − γ, ε)
     denom   = max.(C_prev_v .- gamma_v, 1e-4)
     pi_init = alpha_v ./ denom
@@ -140,10 +137,8 @@ function solve_planner_native(alpha_v::Vector{Float64},
     log_lam_K = log.(max.(BtT(pi_init), 1e-10))
     log_lam_L = log(sum(alpha_v) / max(n * L_eff, eps_val))
 
-    avg_start = max(3 * max_iter ÷ 4, 1)
-    lam_K_sum = zeros(n)
-    lam_L_sum = 0.0
-    avg_count = 0
+    log_y_K = copy(log_lam_K)
+    log_y_L = log_lam_L
 
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
@@ -236,33 +231,22 @@ function solve_planner_native(alpha_v::Vector{Float64},
         log_lam_K_new = log_y_K .+ step_K
         log_lam_L_new = log_y_L  + step_L
 
-        # FISTA Momentum
+        # tk update
         tk_next = (1.0 + sqrt(1.0 + 4.0 * tk_curr^2)) / 2.0
         beta_t  = (tk_curr - 1.0) / tk_next
         tk_curr = tk_next
 
+        # Extrapolation
         log_y_K .= log_lam_K_new .+ beta_t .* (log_lam_K_new .- log_lam_K)
         log_y_L  = log_lam_L_new  + beta_t  * (log_lam_L_new  - log_lam_L)
 
+        # Iterate update
         log_lam_K .= log_lam_K_new
         log_lam_L  = log_lam_L_new
-
-        if iter >= avg_start
-            lam_K_sum .+= exp.(log_lam_K)
-            lam_L_sum  += exp(log_lam_L)
-            avg_count  += 1
-        end
     end
 
-    if !converged && avg_count > 0
-        lam_K  = lam_K_sum ./ avg_count
-        lam_L  = lam_L_sum  / avg_count
-        pi_vec = BtT(lam_K) .+ lam_L .* l_tilde_v
-        C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
-    else
-        lam_K = exp.(log_lam_K)
-        lam_L = exp(log_lam_L)
-    end
+    lam_K = exp.(log_lam_K)
+    lam_L = exp(log_lam_L)
 
     pi_vec_star = BtT(lam_K) .+ lam_L .* l_tilde_v
     X_star      = neumann_apply!(cache, A_m, C_res .+ dK_v .+ G_v, k)

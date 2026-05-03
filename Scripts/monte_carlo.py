@@ -109,7 +109,6 @@ class ProfessionalPlotter:
         ax.fill_between(x, pcts[0], pcts[5], color="#d5e2f0", alpha=0.9, label='90% CI')
         ax.fill_between(x, pcts[1], pcts[4], color="#85a4cd", alpha=0.9, label='70% CI')
         ax.fill_between(x, pcts[2], pcts[3], color="#0b3060", alpha=0.9, label='50% CI')
-        # Median line removed as requested
         
         ax.set_title(f"Monte Carlo: {title}", fontweight="bold", fontsize=14)
         ax.set_ylabel(ylabel)
@@ -118,6 +117,7 @@ class ProfessionalPlotter:
         ax.legend(loc="upper left")
         plt.tight_layout()
         plt.savefig(self.out_dir / f"fan_{filename}.png", dpi=300)
+        plt.savefig(self.out_dir / f"fan_{filename}.pdf")
         plt.close()
 
     def plot_hist(self, data, title, xlabel, filename):
@@ -129,6 +129,7 @@ class ProfessionalPlotter:
         ax.set_ylabel("Frequency (Quarters)")
         plt.tight_layout()
         plt.savefig(self.out_dir / f"hist_{filename}.png", dpi=300)
+        plt.savefig(self.out_dir / f"hist_{filename}.pdf")
         plt.close()
 
 def run_ensemble():

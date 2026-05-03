@@ -6,7 +6,7 @@
     "checkpoint_every": 4,
     "neumann_k": 25,
     "primal_tol": 0.001,
-    "dual_tol": 0.00001,
+    "dual_tol": 0.0001,
     "max_iter": 2000,
     "//_Economic_Parameters": "----------------------------------------------",
     "delta": 0.01,

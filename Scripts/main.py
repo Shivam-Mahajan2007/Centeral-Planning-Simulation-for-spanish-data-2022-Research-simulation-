@@ -1,3 +1,7 @@
+import os
+# Fix segfaults by handling Julia/Python signal collisions (Must be set BEFORE other imports)
+os.environ["PYTHON_JULIACALL_HANDLE_SIGNALS"] = "yes"
+
 import numpy as np
 from pathlib import Path
 import logging

@@ -1,6 +1,6 @@
 # Cybernetic In-Kind Planning Simulation — Spain 2022
 
-A high-performance computational model of a centrally planned macroeconomic system calibrated on the **2022 Spanish Input-Output tables** (65 sectors, ~€1.25 trillion GDP). The simulation features a hybrid **Python-Julia architecture** where a central planner optimizes household utility subject to physical constraints, while modeling decentralized production across 250 autonomous firms.
+> **Project Aim:** This project implements and validates a high-frequency, cybernetic planning engine calibrated to the 2022 Spanish economy. By combining state-of-the-art dual-ascent optimization with a decentralized firm-level production layer, the simulation demonstrates the technical feasibility of real-time economic coordination at an arbitrary scale (up to 10,000 sectors). The model serves as a computational "digital twin" to research the stability, resilience, and growth dynamics of hybrid planning systems under stochastic preference drift and complex production network constraints.
 
 ---
 
