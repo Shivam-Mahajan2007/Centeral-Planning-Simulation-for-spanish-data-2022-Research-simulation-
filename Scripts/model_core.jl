@@ -140,11 +140,16 @@ function solve_planner_native(alpha_v::Vector{Float64},
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
 
-    # --- FISTA in log-space (Multiplicative Dual Ascent) ---
-    # Gradient step always taken from the extrapolated point y (not x).
-    # Fixed step sizes eta_K / eta_L required for FISTA convergence guarantee.
+    # --- FISTA with Backtracking (Multiplicative Dual Ascent) ---
+    # Gradient step taken from the extrapolated point y.
+    # Step size is determined via backtracking on the dual objective.
     log_x_K = copy(log_lam_K); log_x_L = log_lam_L
+    log_x_K_new = copy(log_lam_K)
+    log_x_L_new = log_lam_L
+    
     tk_curr = 1.0
+    L_curr  = L0
+    total_mvps = 2 # From initial K_eff and log_lam_K calculations
 
     converged = false
     opt_iter  = max_iter
@@ -155,10 +160,12 @@ function solve_planner_native(alpha_v::Vector{Float64},
         # --- Evaluate at extrapolated point y ---
         y_K    = exp.(log_y_K); y_L = exp(log_y_L)
         pi_vec = BtT(y_K) .+ y_L .* l_tilde_v
+        total_mvps += 1
         C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
 
         s_K = K_eff .- Bt(C_res)
         s_L = L_eff  - dot(l_tilde_v, C_res)
+        total_mvps += 1 # for Bt(C_res)
 
         # log-space gradient: g = -s/K
         grad_K = .-s_K ./ max.(K_eff, 1e-12)
@@ -176,10 +183,32 @@ function solve_planner_native(alpha_v::Vector{Float64},
             break
         end
 
-        # --- FISTA step 1: gradient step from y → x_new (User step sizes 0.4 / 0.5) ---
-        eK = 0.4; eL = 0.5
-        log_x_K_new = log_y_K .+ eK .* grad_K
-        log_x_L_new = log_y_L  + eL  * grad_L
+        # Evaluate dual objective at y for backtracking
+        obj_y = -dot(alpha_v, log.(max.(pi_vec, eps_val))) - dot(pi_vec, gamma_v) + dot(y_K, K_eff) + y_L * L_eff
+
+        # --- FISTA step 1: gradient step from y → x_new with Backtracking ---
+        L_curr /= L_scale_dn # Try a slightly larger step size than last successful one
+
+        while true
+            step_K = eta_K / L_curr
+            step_L = eta_L / L_curr
+
+            log_x_K_new .= log_y_K .+ step_K .* grad_K
+            log_x_L_new  = log_y_L  + step_L  * grad_L
+
+            # Evaluate at new trial point
+            x_K_try = exp.(log_x_K_new); x_L_try = exp(log_x_L_new)
+            pi_try  = BtT(x_K_try) .+ x_L_try .* l_tilde_v
+            total_mvps += 1
+
+            obj_try = -dot(alpha_v, log.(max.(pi_try, eps_val))) - dot(pi_try, gamma_v) + dot(x_K_try, K_eff) + x_L_try * L_eff
+
+            # Sufficient descent condition (simple objective reduction)
+            if obj_try <= obj_y || L_curr > 1e10
+                break
+            end
+            L_curr *= L_scale_up
+        end
 
         # --- Adaptive Momentum Restart (Zero added MVPs) ---
         # Restart if the direction (y - x) is opposed to the gradient signal.
@@ -213,7 +242,7 @@ function solve_planner_native(alpha_v::Vector{Float64},
         lambda_K   = lam_K,
         lambda_L   = lam_L,
         iterations = opt_iter,
-        mvps       = opt_iter * 2 # Standard FISTA uses 2 MVPs (Bt, BtT) per step
+        mvps       = total_mvps + 2 # +2 for post-loop pi_star and X_star
     )
 end
 

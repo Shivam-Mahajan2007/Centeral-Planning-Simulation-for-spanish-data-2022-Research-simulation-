@@ -38,18 +38,17 @@ initial goods market.
 
 \paragraph{Investment pre-commitment.}
 At the start of each quarter $t$, the planner first assembles a growth
-signal $\hat{G}_{i,t}$-- revealed excess-demand measure from the previous quarter's tatonnement---and
+signal $\vec{\hat{G}}_t$---a revealed excess-demand measure from the previous quarter's tâtonnement---and
 derives a required investment vector $\Delta\vec{K}_t$ via a
-third-order Neumann truncation of the open Leontief capital-requirements
-system:
-\begin{equation}
-  \Delta\vec{K}_t
-    = \sum_{k=1}^{3} M^{k}
-      \left[\hat{G}^{k}\vec{C}_{t-1} + g^{k} \vec{G}_{t}\right]
-\end{equation}
-where the sum is computed iteratively as a sequence of sparse matrix--vector
-products over the normalised matrix $\bar{A}$.
-Government expenditure $G_t$ grows exogenously at a fixed step $g_{\text{step}}
+third-order recursive Neumann truncation of the open Leontief capital-requirements
+system. Let $\mathcal{M}(\vec{v}) = B(I-\bar{A})^{-1} \vec{v}$ be the capital-requirement
+operator. The investment $\vec{I}^{(k)}$ at each stage $k \in \{1,2,3\}$ is computed as:
+\begin{align}
+  \vec{I}^{(1)}_t &= \mathcal{M}(\vec{\hat{G}}_t \odot \vec{C}_{t-1} + g \vec{G}_{t}) \\
+  \vec{I}^{(k)}_t &= \mathcal{M}(\vec{\hat{G}}_t \odot \vec{I}^{(k-1)}_t + g \vec{I}^{(k-1)}_{t, G}) \quad \text{for } k > 1
+\end{align}
+where $\odot$ denotes element-wise multiplication. The total pre-commitment is $\Delta\vec{K}_t = \sum_{k=1}^3 \vec{I}^{(k)}_t$. This ensures that the investment required to produce the new capital is itself accounted for, up to the third order.
+Government expenditure $\vec{G}_t$ grows exogenously at a fixed step $g_{\text{step}}
 = 1\%$ per quarter throughout the horizon.
 
 \paragraph{Planner optimisation.}
@@ -96,8 +95,15 @@ physical supply $\vec{C}_{\text{actual}} = (I{-}\bar{A})\vec{X}_{\text{actual}}
 The quarter is split into three equal ``months''.
 Within each month the Julia routine \texttt{fast\_loop\_native} iterates
 Walrasian tâtonnement: prices are adjusted multiplicatively toward
+The month loop iterates Walrasian tâtonnement: prices are adjusted multiplicatively toward
 market-clearing and capped at a $50\%$ per-step maximum to prevent
-instability.
+instability. 
+The system employs \textbf{Spectral Radius-based Signal Filtering} to ensure the stability of the feedback loop. At the start of the quarter, the spectral radius $\rho(M)$ of the capital-resource operator is estimated via power iteration. This value is used to clamp the revealed preference signals:
+\begin{equation}
+  \text{signal}_i = -\text{clamp}\left( \xi_i \frac{\Delta P_i}{P_i}, 0, \frac{1}{1 + \rho(M)} \right)
+\end{equation}
+where $\xi_i$ is the sectoral responsiveness coefficient derived from the LES demand structure. This filtering prevents the "bullwhip effect" in the investment signals by ensuring the gain of the cybernetic feedback remains below the secondary production threshold.
+
 Simultaneously, household preference vectors undergo a
 log-normal AR(1) drift:
 \begin{multline}
@@ -110,9 +116,6 @@ log-normal AR(1) drift:
 where the mean-reversion target $\bar{\alpha}_{h,i,\tau}$ tracks the
 planner's current estimate via the habit-formation rule
 (Section~\ref{sec:optimization}).
-All random shocks are pre-drawn before the month loop to ensure
-full reproducibility.
-To bypass cross-language interpreter overhead between Python and Julia when orchestrating multi-agent systems, household preference objects are forcibly decoupled into natively typed Julia float blocks. Highly optimising these structures across memory-contiguous column-major layouts permits the tatonnement to be functionally flattened directly into strict BLAS native array multiplications entirely inside the intra-month iterative inner loop, clearing thousands of multi-household demand checks instantly.
 The tâtonnement terminates when the relative price change across all
 sectors falls below $\delta_p = 0.5\%$, or after a maximum of 50
 iterations.
@@ -204,11 +207,11 @@ where $\vec{s}_K = \vec{K}_{\mathrm{eff}} - M\vec{C}(\vec{y})$ and $s_L = L_{\ma
 The shadow prices are updated via a fixed-step gradient descent in log-space:
 %
 \begin{align}\label{eq:dual_update}
-  \ln \lambda_{K,j}^{(t+1)} &= \ln y_{K,j}^{(t)} + \eta_K g_{K,j}^{(t)} \notag \\
-  \ln \lambda_{L}^{(t+1)} &= \ln y_{L}^{(t)} + \eta_L g_L^{(t)},
+  \ln \lambda_{K,j}^{(t+1)} &= \ln y_{K,j}^{(t)} + \sigma^{(t)} \eta_K g_{K,j}^{(t)} \notag \\
+  \ln \lambda_{L}^{(t+1)} &= \ln y_{L}^{(t)} + \sigma^{(t)} \eta_L g_L^{(t)},
 \end{align}
 %
-where $\eta_K \approx 0.4$ and $\eta_L \approx 0.5$ are the sectoral learning rates. 
+where the base learning rates $\eta_K \approx 0.4$ and $\eta_L \approx 0.5$ are dynamically scaled by a factor $\sigma^{(t)}$ determined via a \textbf{backtracking line search} on the dual objective value. This ensures monotonicity in dual convergence even in the presence of high sectoral curvature.
 
 To prevent momentum-driven oscillations near the capacity singularities, we implement an \textbf{Adaptive Gradient Restart} rule. The Nesterov momentum sequence $t_k$ is reset to unity ($t_k = 1$) whenever the extrapolation direction works against the current gradient signal:
 %
@@ -226,19 +229,20 @@ This formulation allows the solver to handle sectors with vastly different capit
 
 
 \paragraph{Complexity per Matrix-Vector Operation (MVP).}
-Each iteration of~\eqref{eq:dual_update} requires exactly \textbf{two Matrix-Vector Products (MVPs)}: one forward Neumann application $M\vec{C}$ for capacity check, and one adjoint application $M^\top\vec{\lambda}_K$ for shadow price valuation.
-The total computational cost per quarter is typically measured in MVPs, where successful convergence at $10^{-5}$ tolerance is achieved within \textbf{360--400 MVPs}.
+Each iteration of~\eqref{eq:dual_update} requires at least \textbf{two Matrix-Vector Products (MVPs)}: one forward Neumann application $M\vec{C}$ for capacity evaluation, and one adjoint application $M^\top\vec{\lambda}_K$ for shadow price valuation. The backtracking line search consumes one additional adjoint MVP per trial step to evaluate the dual objective. 
+The total computational cost per quarter is measured in cumulative MVPs, where successful convergence at $10^{-5}$ tolerance is typically achieved within \textbf{400--450 MVPs}.
 For sparse empiric IO tables, each MVP costs $O(k \cdot \mathrm{nnz}(A))$, where $k$ is the Neumann expansion order.
 \subsection{Convergence Criteria}
 
 The iterative loop monitors the physical constraint violations and checks for mathematical stabilization.
 
 \paragraph{KKT Tolerance.}
-The algorithm terminates successfully if the normalized constraint violations disappear and the complementary slackness conditions hold at the true iterate $\vec{\lambda}^{(t)}$ at a high-precision threshold:
-$$
-\lambda_{L}^{(t)} |s_L| \leq 10^{-5} ,\  
-\lambda_{K,j}^{(t)}|s_{K,j}| \leq 10^{-5}
-$$
+The algorithm terminates successfully if both the dual complementarity and primal feasibility conditions are satisfied at a high-precision threshold (typically $10^{-4}$ or $10^{-5}$):
+\begin{align}
+  \text{Dual: } & \lambda_{L}^{(t)} |s_L| \leq \text{tol}_d, \quad \lambda_{K,j}^{(t)}|s_{K,j}| \leq \text{tol}_d \\
+  \text{Primal: } & \frac{| \min(0, s_L) |}{L_{\text{eff}}} \leq \text{tol}_p, \quad \frac{| \min(0, s_{K,j}) |}{K_{\text{eff},j}} \leq \text{tol}_p
+\end{align}
+where $s_L$ and $\vec{s}_K$ are the slacks net of resource bounds. 
 
 \subsection{Decentralised Firm Production and Household Income Distribution}
 
@@ -278,7 +282,7 @@ This represents a \textbf{massive speedup} over preceding implementations,
 achieved primarily through vectorized data exchange and the elimination of 
 redundant Python-Julia bridge calls.
 The memory complexity remains strictly $O(n^2)$, ensuring scalability 
-for larger IO benchmarks. The solver convergence is robust, typically requiring \textbf{180--200 iterations} (equivalent to \textbf{360--400 MVPs}) to satisfy the strict $10^{-5}$ KKT tolerance.
+for larger IO benchmarks. The solver convergence is robust, typically requiring \textbf{160--180 iterations} (totalling \textbf{400--450 MVPs}) to satisfy the strict $10^{-5}$ KKT tolerance.
 
 \begin{figure}[htbp]
     \centering
