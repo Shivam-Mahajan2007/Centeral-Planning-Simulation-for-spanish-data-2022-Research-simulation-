@@ -5,7 +5,7 @@
     "n_runs": 250,
     "rng_seed": null,
     "checkpoint_every": 4,
-    "neumann_k": 25,
+    "neumann_k": 27,
     "primal_tol": 0.001,
     "dual_tol": 0.0001,
     "max_iter": 2000,
