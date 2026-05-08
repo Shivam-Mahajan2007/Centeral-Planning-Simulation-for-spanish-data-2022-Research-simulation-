@@ -8,7 +8,6 @@
 
 The simulation models a cybernetic planning system where resources are allocated based on revealed demand signals.
 
-- **Stable Preconditioned Dual Ascent**: A state-of-the-art dual-ascent solver using **Jacobi Preconditioned Barzilai-Borwein (PBB)** step sizes and **FISTA (Beck-Teboulle)** momentum. It achieves high-precision convergence ($10^{-5}$ KKT) in ~120 iterations.
 - **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99% and achieving a 7-10x speedup.
 - **Decentralized Production (250 Firms)**: Sectoral capital is distributed across 250 independent firms. Each firm solves a local Linear Program natively via the **HiGHS Dual Simplex** solver.
 - **Micro-Aggregated Demand Side**: 1,000 heterogeneous households with Linear Expenditure System (LES) utility functions.
