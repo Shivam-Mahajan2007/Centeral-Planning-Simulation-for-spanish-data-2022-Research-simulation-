@@ -65,7 +65,8 @@ class EnsembleConfig:
             "eta_K": 0.2,
             "eta_L": 0.15,
             "max_iter": 2000,
-            "cybernetic_k_sigma": 1.0
+            "cybernetic_k_sigma": 1.0,
+            "sigma_val": 1.0
         }
 
     def get(self, key):

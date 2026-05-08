@@ -102,6 +102,7 @@ def _run_simulation_thread(config: dict):
             c_step=config.get("c_step", 0.01),
             habit_persistence=config.get("habit_persistence", 0.7),
             nominal_consumption_annual=config.get("nominal_consumption_annual", 807e9),
+            sigma_val=config.get("sigma_val", 1.0),
         )
         seed = config.get("rng_seed", 42)
         state.rng = np.random.default_rng(seed)
@@ -233,7 +234,7 @@ def _mc_thread(config: dict):
         from data_loader import load_data
         from calibration import calibrate
         from simulation import run_simulation
-        from monte_carlo import plot_fan_chart, plot_iteration_histogram
+        from monte_carlo import ProfessionalPlotter
 
         data = load_data(DATA_DIR)
         traj_iterations = np.zeros((n_runs, n_q))
@@ -272,6 +273,7 @@ def _mc_thread(config: dict):
                 habit_persistence=cfg_i.get("habit_persistence", 0.7),
                 nominal_consumption_annual=cfg_i.get("nominal_consumption_annual", 807e9),
                 labor_mult=cfg_i.get("labor_mult", 1.0),
+                sigma_val=cfg_i.get("sigma_val", 1.0),
             )
             state.slim_history = True
             state.rng = np.random.default_rng(1000 + i)
@@ -315,15 +317,16 @@ def _mc_thread(config: dict):
             (traj_lambda_L,          "Shadow Price of Labor",            "Shadow Value", "lambda_l"),
         ]
         generated = []
+        plotter = ProfessionalPlotter(mc_dir)
         for data_arr, title, ylabel, fname in charts_mc:
             try:
-                plot_fan_chart(data_arr, f"Monte Carlo: {title}", ylabel, mc_dir / f"fan_{fname}.png")
+                plotter.plot_fan(data_arr, title, ylabel, fname)
                 generated.append(fname)
             except Exception as e:
                 _mc_queue.put({"type": "log", "msg": f"  [WARN] {fname}: {e}"})
 
         try:
-            plot_iteration_histogram(traj_iterations, mc_dir / "iterations.png")
+            plotter.plot_hist(traj_iterations, "Iteration Count", "Iterations", "iterations")
             generated.append("iterations")
         except Exception as e:
             _mc_queue.put({"type": "log", "msg": f"  [WARN] iterations: {e}"})

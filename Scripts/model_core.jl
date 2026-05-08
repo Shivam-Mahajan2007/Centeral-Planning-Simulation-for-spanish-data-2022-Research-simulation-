@@ -96,8 +96,9 @@ end
 """
     solve_planner_native(...)
 
-Solve the central planning optimization problem via a Preconditioned Barzilai-Borwein method on the dual.
-Finds structural shadow prices and target consumption maximizing welfare.
+Solve the central planning optimization problem via FISTA (Nesterov-accelerated) dual ascent 
+with backtracking on the dual objective. Optimizes a CRRA aggregate welfare function 
+subject to material balance and resource constraints (Capital and Labor).
 """
 function solve_planner_native(alpha_v::Vector{Float64},
                               A_m::Matrix{Float64},
@@ -107,7 +108,7 @@ function solve_planner_native(alpha_v::Vector{Float64},
                               K_v::Vector{Float64},
                               L_total_f::Float64,
                               G_v::Vector{Float64},
-                              gamma_v::Vector{Float64},
+                              sigma_v::Vector{Float64},
                               C_prev_v::Vector{Float64};
                               k::Int=20,
                               tol::Float64=1e-4,
@@ -129,9 +130,8 @@ function solve_planner_native(alpha_v::Vector{Float64},
 
     K_eff = K_v .- Bt(dK_v)
     L_eff = L_total_f - dot(l_tilde_v, dK_v)
-    # Cold-start duals: π₀ = α / max(C_prev − γ, ε)
-    denom   = max.(C_prev_v .- gamma_v, 1e-4)
-    pi_init = alpha_v ./ denom
+    # Cold-start duals: π₀ = α / max(C_prev, ε)^σ
+    pi_init = alpha_v ./ max.(C_prev_v, 1e-4).^sigma_v
 
     # Use the full vector space (no filtering of 'active' sectors)
     log_lam_K = log.(max.(BtT(pi_init), 1e-10))
@@ -161,7 +161,7 @@ function solve_planner_native(alpha_v::Vector{Float64},
         y_K    = exp.(log_y_K); y_L = exp(log_y_L)
         pi_vec = BtT(y_K) .+ y_L .* l_tilde_v
         total_mvps += 1
-        C_res  = gamma_v .+ alpha_v ./ max.(pi_vec, eps_val)
+        C_res  = (max.(alpha_v, 1e-15) ./ max.(pi_vec, eps_val)).^(1.0 ./ sigma_v)
 
         s_K = K_eff .- Bt(C_res)
         s_L = L_eff  - dot(l_tilde_v, C_res)
@@ -184,7 +184,17 @@ function solve_planner_native(alpha_v::Vector{Float64},
         end
 
         # Evaluate dual objective at y for backtracking
-        obj_y = -dot(alpha_v, log.(max.(pi_vec, eps_val))) - dot(pi_vec, gamma_v) + dot(y_K, K_eff) + y_L * L_eff
+        # f_i(pi) = (sigma/(1-sigma)) * alpha^(1/sigma) * pi^(1-1/sigma)  if sigma != 1
+        # f_i(pi) = alpha * log(alpha/pi) - alpha                        if sigma == 1
+        obj_y = dot(y_K, K_eff) + y_L * L_eff
+        for i in 1:n
+            sig = sigma_v[i]; al = alpha_v[i]; p = max(pi_vec[i], eps_val)
+            if abs(sig - 1.0) < 1e-6
+                obj_y += al * log(max(al, eps_val) / p) - al
+            else
+                obj_y += (sig / (1.0 - sig)) * al^(1.0/sig) * p^(1.0 - 1.0/sig)
+            end
+        end
 
         # --- FISTA step 1: gradient step from y → x_new with Backtracking ---
         L_curr /= L_scale_dn # Try a slightly larger step size than last successful one
@@ -201,7 +211,15 @@ function solve_planner_native(alpha_v::Vector{Float64},
             pi_try  = BtT(x_K_try) .+ x_L_try .* l_tilde_v
             total_mvps += 1
 
-            obj_try = -dot(alpha_v, log.(max.(pi_try, eps_val))) - dot(pi_try, gamma_v) + dot(x_K_try, K_eff) + x_L_try * L_eff
+            obj_try = dot(x_K_try, K_eff) + x_L_try * L_eff
+            for i in 1:n
+                sig = sigma_v[i]; al = alpha_v[i]; p = max(pi_try[i], eps_val)
+                if abs(sig - 1.0) < 1e-6
+                    obj_try += al * log(max(al, eps_val) / p) - al
+                else
+                    obj_try += (sig / (1.0 - sig)) * al^(1.0/sig) * p^(1.0 - 1.0/sig)
+                end
+            end
 
             # Sufficient descent condition (simple objective reduction)
             if obj_try <= obj_y || L_curr > 1e10
@@ -231,7 +249,7 @@ function solve_planner_native(alpha_v::Vector{Float64},
     lam_K       = exp.(log_x_K)
     lam_L       = exp(log_x_L)
     pi_vec_star = BtT(lam_K) .+ lam_L .* l_tilde_v
-    C_star      = gamma_v .+ alpha_v ./ max.(pi_vec_star, eps_val)
+    C_star      = (max.(alpha_v, 1e-15) ./ max.(pi_vec_star, eps_val)).^(1.0 ./ sigma_v)
     X_star      = neumann_apply!(cache, A_m, C_star .+ dK_v .+ G_v, k)
 
     return (
@@ -247,7 +265,7 @@ function solve_planner_native(alpha_v::Vector{Float64},
 end
 
 # Python wrapper
-function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, gamma, C_prev;
+function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, sigma, C_prev;
                        k::Int=20,
                        tol::Float64=1e-4,
                        tol_p::Float64=tol, tol_d::Float64=tol,
@@ -255,13 +273,19 @@ function solve_planner(alpha, A_bar, B, l_tilde, dK, K, L_total::Real, G_vec, ga
                        max_iter::Int=2000)
     solve_planner_native(
         _v(alpha), _m(A_bar), _m(B), _v(l_tilde), _v(dK), _v(K),
-        Float64(L_total), _v(G_vec), _v(gamma), _v(C_prev);
+        Float64(L_total), _v(G_vec), _v(sigma), _v(C_prev);
         k=k, tol=tol, tol_p=tol_p, tol_d=tol_d,
         eta_K=eta_K, eta_L=eta_L, max_iter=max_iter)
 end
 
 """
     fast_loop_native(...)
+
+Operates the monthly market clearing loop. Includes:
+1. Dynamic evolution of consumer preferences (alpha) with persistence and shocks.
+2. Market-clearing price tatonnement using a Newton step on CRRA demand functions.
+3. Multi-household demand aggregation using common marginal utility (mu_t).
+4. Revealed preference inference (alpha_reveal) and cybernetic growth signal generation.
 """
 function fast_loop_native(P_base_v::Vector{Float64},
                           C_plan_v::Vector{Float64},
@@ -272,7 +296,7 @@ function fast_loop_native(P_base_v::Vector{Float64},
                           drift_sigma::Float64,
                           noise_sigma::Float64,
                           Y_f::Float64,
-                          gamma_v::Vector{Float64},
+                          sigma_v::Vector{Float64},
                           K_v_vec::Vector{Float64},
                           A_bar_m::Matrix{Float64},
                           B_m::Matrix{Float64},
@@ -282,14 +306,15 @@ function fast_loop_native(P_base_v::Vector{Float64},
                           price_tol::Float64=0.005,
                           price_step_cap::Float64=0.5,
                           alpha_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
-                          gamma_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
                           Y_h::Union{Nothing, AbstractVector{Float64}}=nothing,
+                          w_h::Union{Nothing, AbstractVector{Float64}}=nothing,
                           alpha_slow_h::Union{Nothing, AbstractMatrix{Float64}}=nothing,
                           k_sigma::Float64=1.0,
                           neumann_k::Int=20,
-                          rho_M_in::Float64=-1.0)
+                          rho_M_in::Float64=-1.0,
+                          mu_t::Float64=1.0)
 
-    multi_hh  = !isnothing(alpha_h) && !isnothing(gamma_h) && !isnothing(Y_h)
+    multi_hh  = !isnothing(alpha_h)
     n_h_count = multi_hh ? size(alpha_h, 1) : 0
 
     local alpha_h_ev
@@ -297,13 +322,12 @@ function fast_loop_native(P_base_v::Vector{Float64},
 
     n = length(P_base_v)
     C_m     = C_plan_v ./ n_months
-    gamma_m = gamma_v  ./ n_months
     Y_m     = Y_f / n_months
 
-    local gamma_h_m, Y_h_m
+    local Y_h_m, w_h_v
     if multi_hh
-        gamma_h_m = gamma_h ./ n_months
-        Y_h_m     = Y_h ./ n_months
+        Y_h_m     = isnothing(Y_h) ? nothing : Y_h ./ n_months
+        w_h_v     = isnothing(w_h) ? fill(1.0/n_h_count, n_h_count) : w_h
     end
 
     C_monthly = zeros(n_months, n)
@@ -392,43 +416,52 @@ function fast_loop_native(P_base_v::Vector{Float64},
         end
 
         P_iter = copy(P_base_v)
-        local gamma_sum
-        if multi_hh; gamma_sum = vec(sum(gamma_h_m, dims=1)); end
-
+        
+        # Inner loop to find market clearing prices P_iter
         for _ in 1:max_price_iter
+            C_d_iter = zeros(n)
             if multi_hh
-                resid_Y_h_iter = max.(Y_h_m .- gamma_h_m * P_iter, 1e-30)
-                C_d_iter = gamma_sum .+ (alpha_h_ev' * resid_Y_h_iter) ./ max.(P_iter, 1e-30)
+                for h in 1:n_h_count
+                    # Demand with common mu: C_hi = (w_h * alpha_hi / (mu * P_i))^(1/sigma_i)
+                    C_d_iter .+= (w_h_v[h] .* alpha_h_ev[h, :] ./ (mu_t .* P_iter)).^(1.0 ./ sigma_v)
+                end
             else
-                resid_Y_iter = max(Y_m - dot(P_iter, gamma_m), 1e-30)
-                C_d_iter     = gamma_m .+ a_f .* resid_Y_iter ./ max.(P_iter, 1e-30)
+                # Single aggregate household
+                C_d_iter .= (a_f ./ (mu_t .* P_iter)).^(1.0 ./ sigma_v)
             end
+            
             Z_iter = C_d_iter .- C_m
-            denom_step = (C_d_iter .+ C_m) ./ 2.0
-            P_iter = P_iter .* (1.0 .+ price_step_cap .* Z_iter ./ max.(denom_step, 1e-12))
+            # P_new = P * (1 + sigma * Z/C)
+            P_iter = P_iter .* (1.0 .+ sigma_v .* price_step_cap .* Z_iter ./ max.(C_m, 1e-12))
             P_iter = max.(P_iter, 1e-12)
 
-            if maximum(abs.(Z_iter) ./ max.((C_d_iter .+ C_m) ./ 2.0, 1e-12)) < 0.005
+            if maximum(abs.(Z_iter) ./ max.(C_m, 1e-12)) < 0.005
                 break
             end
         end
         P_clear = P_iter
 
+        # Realized consumption C_d
+        C_d = zeros(n)
         if multi_hh
-            resid_Y_h_star = max.(Y_h_m .- gamma_h_m * P_clear, 1e-30)
-            resid_Y_star   = sum(resid_Y_h_star)
-            C_d = gamma_sum .+ (alpha_h_ev' * resid_Y_h_star) ./ max.(P_clear, 1e-30)
+            for h in 1:n_h_count
+                C_d .+= (w_h_v[h] .* alpha_h_ev[h, :] ./ (mu_t .* P_clear)).^(1.0 ./ sigma_v)
+            end
+            resid_Y_star = isnothing(Y_h_m) ? 1.0 : sum(Y_h_m)
         else
-            resid_Y_star = max(Y_m - dot(P_clear, gamma_m), 1e-30)
-            C_d          = gamma_m .+ a_f .* resid_Y_star ./ max.(P_clear, 1e-30)
+            C_d .= (a_f ./ (mu_t .* P_clear)).^(1.0 ./ sigma_v)
+            resid_Y_star = Y_m
         end
 
-        a_reveal_sum .+= (P_clear .* (C_d .- gamma_m)) ./ max(resid_Y_star, 1e-30)
+        # Reveal preference according to alpha_agg update formula:
+        # alpha_reveal_i = (P_i * C_i^sigma_i) / sum(P_j * C_j^sigma_j)
+        reveal_nums = P_clear .* (max.(C_d, 1e-12).^sigma_v)
+        a_reveal_sum .+= reveal_nums ./ max(sum(reveal_nums), 1e-30)
 
-        eps_i     = abs.(-1.0 .+ (gamma_m ./ max.(C_d, 1e-30)) .* (1.0 .- a_f))
+        eps_i     = 1.0 ./ sigma_v
         delta_p   = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
         val       = eps_i .* delta_p
-        signal    = .-clamp.(val, 0.0, 1.0 / (rho_M + 1.0))
+        signal    = .-clamp.(val, -1.0, 1.0 / (rho_M + 1.0))
         denom_sig = 1.0 .+ signal
         C_hat_sum .+= C_m ./ denom_sig
 
@@ -470,35 +503,37 @@ end
 function fast_loop(P_base, C_plan, alpha_true_start, alpha_slow,
                    rng::AbstractRNG,
                    drift_rho::Real, drift_sigma::Real, noise_sigma::Real,
-                   Y::Real, gamma, K_v, A_bar, B, n_months::Int=3;
+                   Y::Real, sigma, K_v, A_bar, B, n_months::Int=3;
                    theta_drift::Float64=0.1,
                    max_price_iter::Int=50,
                    price_tol::Float64=0.005,
                    price_step_cap::Float64=0.5,
                    alpha_h=nothing,
-                   gamma_h=nothing,
                    Y_h=nothing,
+                   w_h=nothing,
                    alpha_slow_h=nothing,
                    k_sigma::Float64=1.0,
                    neumann_k::Int=20,
-                   rho_M_in::Float64=-1.0)
+                   rho_M_in::Float64=-1.0,
+                   mu_t::Float64=1.0)
 
     fast_loop_native(
         _v(P_base), _v(C_plan), _v(alpha_true_start), _v(alpha_slow),
         rng,
         Float64(drift_rho), Float64(drift_sigma), Float64(noise_sigma),
-        Float64(Y), _v(gamma), _v(K_v), _m(A_bar), _m(B), n_months;
+        Float64(Y), _v(sigma), _v(K_v), _m(A_bar), _m(B), n_months;
         theta_drift=theta_drift,
         max_price_iter=max_price_iter,
         price_tol=price_tol,
         price_step_cap=price_step_cap,
         alpha_h = isnothing(alpha_h) ? nothing : _m(alpha_h),
-        gamma_h = isnothing(gamma_h) ? nothing : _m(gamma_h),
         Y_h = isnothing(Y_h) ? nothing : _v(Y_h),
+        w_h = isnothing(w_h) ? nothing : _v(w_h),
         alpha_slow_h = isnothing(alpha_slow_h) ? nothing : _m(alpha_slow_h),
         k_sigma=k_sigma,
         neumann_k=neumann_k,
-        rho_M_in=rho_M_in)
+        rho_M_in=rho_M_in,
+        mu_t=mu_t)
 end
 
 const FIRM_SOLVER_CACHE = Dict{Int, Any}()
@@ -574,7 +609,7 @@ if VERSION >= v"1.9"
     # Using precompile() is more efficient than a let block for loading speed.
     precompile(neumann_apply!, (NeumannCache, Matrix{Float64}, Vector{Float64}, Int))
     precompile(solve_planner_native, (Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, Float64, Vector{Float64}, Vector{Float64}, Vector{Float64}))
-    precompile(fast_loop_native, (Vector{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, MersenneTwister, Float64, Float64, Float64, Float64, Vector{Float64}, Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Int))
+    precompile(fast_loop_native, (Vector{Float64}, Vector{Float64}, Vector{Float64}, Vector{Float64}, MersenneTwister, Float64, Float64, Float64, Float64, Vector{Float64}, Vector{Float64}, Matrix{Float64}, Matrix{Float64}, Int, Float64))
 end
 
 end  # module ModelCore

@@ -21,9 +21,9 @@ def run_quarter(state: ModelState) -> ModelState:
     """
     Execute a single quarterly step of the macroeconomic simulation.
     
-    This incorporates agent habit formation, central planner target optimization,
-    firm-level parallel production via JuMP, and a multi-household tatonnement loop
-    for end-of-period market clearing and price discovery.
+    This incorporates agent habit formation, central planner target optimization (CRRA),
+    firm-level parallel production via JuMP, Laspeyres factor chaining for zero-inflation 
+    anchoring, and a multi-household market clearing loop for price discovery.
     """
     t    = state.t
     slim = getattr(state, "slim_history", False)
@@ -93,7 +93,7 @@ def run_quarter(state: ModelState) -> ModelState:
 
     # --- Planner optimisation ----------------------------------------------------
     opt = solve_planner(state.alpha, state.A_bar, state.B,
-                        state.l_tilde, dK, K_eff, L_eff, G_vec, state.gamma, state.C,
+                        state.l_tilde, dK, K_eff, L_eff, G_vec, state.sigma_vec, state.C,
                         k=state.neumann_k,
                         tol_p=state.primal_tol, tol_d=state.dual_tol,
                         eta_K=state.eta_K, eta_L=state.eta_L,
@@ -106,6 +106,24 @@ def run_quarter(state: ModelState) -> ModelState:
     C_star = opt["C_star"]
     X_star = opt["X_star"]
     pi     = opt["pi_star"]
+
+    # --- Marginal Utility Chaining (Enforce Zero Inflation per Eq. 45) ------------
+    # mu_t / mu_{t-1} = (pi_t @ C_{t-1}) / (pi_{t-1} @ C_{t-1})
+    pi_prev = state.pi_prev
+    # Use previous quarter's consumption for the Laspeyres anchor
+    C_prev  = state.C 
+    
+    # Calculate shadow inflation from previous optimal state
+    shadow_inflation = float(np.dot(pi, C_prev) / max(np.dot(pi_prev, C_prev), 1e-30))
+    state.mu_planner *= shadow_inflation
+    state.pi_prev     = pi.copy()
+    
+    # Update nominal income Y to maintain budget clearing at chained prices:
+    # Y_t = (pi_t @ C_t*) / mu_t
+    state.Y = float(np.dot(pi, C_star) / max(state.mu_planner, 1e-30))
+
+    logger.info(f"   [DIAG] mu_planner       = {state.mu_planner:.4e}")
+    logger.info(f"   [DIAG] nominal_income Y = {state.Y/1e9:.2f} B EUR")
     logger.info(f"   [DIAG] C_star total     = {C_star.sum()/1e9:.2f} B EUR  "
                 f"({'converged' if opt['success'] else 'NOT CONVERGED'}, "
                 f"{opt.get('iterations',-1)} iters)")
@@ -212,7 +230,8 @@ def run_quarter(state: ModelState) -> ModelState:
     Y_planner = float(v_eff @ X_star) * state.income_scale
 
     # --- Prices and inflation ----------------------------------------------------
-    P_new = (Y * pi) / (1.0 + np.dot(pi, state.gamma))
+    # mu_planner is (pi @ C) / Y => P = pi / mu_planner
+    P_new = pi / max(state.mu_planner, 1e-30)
 
     denom_inf    = np.dot(state.P, state.C)
     inflation_link = np.dot(P_new, state.C) / max(denom_inf, 1e-30)
@@ -245,6 +264,7 @@ def run_quarter(state: ModelState) -> ModelState:
     n_h = state.n_households
     Y_f_scaled = Y_f * state.income_scale          # (n_firms,) scaled firm incomes
     Y_h = state.W_ownership @ Y_f_scaled           # (n_h,) household incomes
+    state.w_h = Y_h / max(Y_h.sum(), 1e-30)        # Update welfare weights per Eq. 115
 
     # Physical consumption achievable from ACTUAL production (Net of Depreciation!)
     # We use A_bar here to reserve goods for replacement investment.
@@ -259,11 +279,12 @@ def run_quarter(state: ModelState) -> ModelState:
     fast_res = fast_loop(
         P_new, C_actual, state.alpha_macro, state.alpha_slow, state.rng,
         state.pref_drift_rho, state.pref_drift_sigma, state.pref_noise_sigma,
-        Y, state.gamma, K_eff, state.A_bar, state.B,
+        Y, state.sigma_vec, K_eff, state.A_bar, state.B,
         theta_drift=state.theta_drift,
         alpha_h=state.alpha_true_h,
-        gamma_h=state.gamma_h,
         Y_h=Y_h,
+        w_h=state.w_h,
+        mu_t=state.mu_planner * 3.0, # Convert quarterly MU to monthly (3 months in quarter)
         alpha_slow_h=state.alpha_slow_h,
         price_tol=state.price_tol,
         max_price_iter=state.max_price_iter,

@@ -181,6 +181,7 @@ class ModelState:
     max_price_iter:   int
     epsilon:          float
     wage_rate:    float
+    sigma_vec:    np.ndarray
     neumann_k:    int
     primal_tol:   float
     dual_tol:     float
@@ -204,6 +205,8 @@ class ModelState:
     alpha_habit:  np.ndarray    = field(default_factory=lambda: np.array([]))
     alpha_bar:    np.ndarray    = field(default_factory=lambda: np.array([]))
     P:            np.ndarray    = field(default_factory=lambda: np.array([]))
+    pi_prev:      np.ndarray    = field(default_factory=lambda: np.array([]))
+    mu_planner:   float         = 1.0
     C:            np.ndarray    = field(default_factory=lambda: np.array([]))
     X:            np.ndarray    = field(default_factory=lambda: np.array([]))
     Y:            float         = 0.0
@@ -223,16 +226,15 @@ class ModelState:
     pi_0_fixed:   np.ndarray    = field(default_factory=lambda: np.array([]))
     dual_weight_0: np.ndarray   = field(default_factory=lambda: np.array([]))
     C_0_init:     np.ndarray    = field(default_factory=lambda: np.array([]))
-    gamma:        np.ndarray    = field(default_factory=lambda: np.array([]))
     lambda_K_0:   np.ndarray    = field(default_factory=lambda: np.array([]))
     lambda_L_0:   float         = 0.0
     CPI_chained:  float         = 1.0
     # Multi-household demand side
     n_households: int            = 4
+    w_h:          np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households,)
     W_ownership:  np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_firms)
     alpha_h:      np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
     alpha_true_h: np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
-    gamma_h:      np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
     alpha_slow_h: np.ndarray    = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
     alpha_habit_h: np.ndarray   = field(default_factory=lambda: np.array([]))  # (n_households, n_sectors)
     n_firms:      int            = 5
@@ -257,8 +259,8 @@ def calibrate(data: dict,
               primal_tol:   float = 1e-3,
               dual_tol:     float = 1e-4,
               cybernetic_k_sigma: float = 1.0,
-              eta_K:        float = 0.15,
-              eta_L:        float = 0.15,
+              eta_K:        float = 0.40,
+              eta_L:        float = 0.50,
               max_iter:     int   = 2000,
               g_step:       float = 0.0,
               c_step:       float = 0.01,
@@ -270,12 +272,16 @@ def calibrate(data: dict,
               hh_dispersion: float = 0.05,
               price_tol: float = 0.005,
               max_price_iter: int = 25,
-              n_firms: int = 5) -> ModelState:
-    """Build a fully calibrated ModelState from the IO data dict.
-
-    All monetary inputs in `data` are in EUR/quarter (as produced by data_loader).
-    Physical output is derived as X_real = V / v_per_unit rather than taken
-    directly from the IO gross-output column.
+              n_firms: int = 5,
+              sigma_val: float = 1.0) -> ModelState:
+    """
+    Build a fully calibrated ModelState from the IO data dict.
+    
+    This includes:
+    1. Recovering physical units using sector-specific capital intensity (kappa).
+    2. Generating firm-level heterogeneity and multi-household preference distributions.
+    3. Initializing aggregate preferences via the CES transition formula.
+    4. Anchoring market prices and marginal utility of income (mu_0).
     """
     A_in         = data["A"]
     V            = np.asarray(data["V_total"], dtype=float).copy()
@@ -422,6 +428,7 @@ def calibrate(data: dict,
         G_hat_init=G_hat_init,
         G_hat_raw_prev=G_hat_init.copy(),
         dK_0=dK_0.copy(),
+        sigma_vec=np.full(n, sigma_val),
     )
 
     if slim_history is None:
@@ -430,11 +437,12 @@ def calibrate(data: dict,
             logger.info("[calibration] Auto-enabled slim_history for n > 5000")
     state.slim_history = slim_history
 
-    pi_0 = np.divide(alpha_0, C_0, out=np.zeros_like(alpha_0), where=C_0 > 1e-12)
+    pi_0 = alpha_0 / (np.maximum(C_0, 1e-12)**state.sigma_vec)
 
     state.P_0             = P_0.copy()
+    state.pi_prev         = pi_0.copy()
+    state.mu_planner      = float(np.dot(pi_0, C_0) / max(Y_0, 1e-30))
     state.C_0_init        = C_0.copy()
-    state.gamma           = np.zeros_like(C_0)        # gamma=0 diagnostic test
     state.VAL_0_Laspeyres = 1.0
     state.pi_0_fixed      = np.array([])
     state.dual_weight_0   = np.array([])
@@ -452,8 +460,7 @@ def calibrate(data: dict,
     # Transposing gives (n_households, n_firms) where COLUMNS sum to 1
     state.W_ownership = rng_hh.dirichlet(np.ones(n_households), size=n_firms).T
 
-    # Per-household subsistence: gamma_h = gamma / n_households
-    state.gamma_h = np.tile(state.gamma / n_households, (n_households, 1))  # (4, N)
+    # Per-household subsistence: removed
 
     # Per-household preferences: initialise with log-normal dispersion around
     # aggregate alpha_0.  σ = 0.15 gives meaningful heterogeneity for the
@@ -466,9 +473,29 @@ def calibrate(data: dict,
         a_h /= a_h.sum()
         alpha_h[h, :] = a_h
     state.alpha_h = alpha_h
+    state.w_h = np.ones(n_households) / n_households # Uniform weights
     state.alpha_true_h = alpha_h.copy()
     state.alpha_slow_h = alpha_h.copy()
     state.alpha_habit_h = alpha_h.copy()
+
+    # Initial Aggregate Alpha: CES aggregate per Eq. 57
+    # alpha_agg_i = [sum_h (w_h * alpha_hi)^(1/sigma_i)]^sigma_i
+    def get_alpha_agg(weights):
+        a_agg = np.zeros(n)
+        for i in range(n):
+            inner_sum = np.sum((weights * alpha_h[:, i])**(1.0 / state.sigma_vec[i]))
+            a_agg[i] = inner_sum**state.sigma_vec[i]
+        return a_agg
+
+    # Scale weights so that alpha_agg sums to 1
+    current_agg = get_alpha_agg(state.w_h)
+    S = current_agg.sum()
+    # Note: alpha_agg is proportional to weights. 
+    # alpha_agg_i(k*w) = [sum(k*w*a)^(1/sig)]^sig = k * alpha_agg_i(w)
+    state.w_h /= S
+    
+    state.alpha = get_alpha_agg(state.w_h) # Now sums to 1
+    
     state.price_tol = price_tol
     state.max_price_iter = max_price_iter
 
