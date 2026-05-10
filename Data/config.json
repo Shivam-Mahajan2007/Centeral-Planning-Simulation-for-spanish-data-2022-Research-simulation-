@@ -18,7 +18,7 @@
     "epsilon": 0.5,
     "habit_persistence": 0.9,
     "theta_drift": 0.03,   
-    "pref_drift_rho": 0.9, 
+    "pref_drift_rho": 0.95, 
     "pref_drift_sigma": 0.02, 
     "pref_noise_sigma": 0.05, 
     "price_tol": 0,

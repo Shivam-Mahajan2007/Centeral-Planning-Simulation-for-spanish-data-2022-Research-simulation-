@@ -178,6 +178,7 @@ def main():
     plot_firm_income_distribution(state.history, state.n, r / "20_firm_income.png")
 
     logger.info("\nAll charts and analysis saved to ./Results/")
+    return state
 
 
 if __name__ == "__main__":

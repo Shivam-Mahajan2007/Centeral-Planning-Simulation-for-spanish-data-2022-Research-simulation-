@@ -1,0 +1,140 @@
+\section{Revealed Demand and Endogenous Growth}
+\label{sec:growth}
+
+\subsection{Utility Function and Demand}
+
+Household preferences are represented by a CRRA surrogate utility
+function, in which each good $i$ carries a good-specific curvature
+parameter $\sigma_i > 0$, common across all households:
+%
+\begin{equation}\label{eq:utility}
+\hat{W}_t(\vec{C}) = \sum_{i=1}^n \alpha^{agg}_{i,t}
+  \,\frac{C_{i}^{1-\sigma_i}}{1-\sigma_i}
+\end{equation}
+%
+where $\alpha^{agg}_{i,t} > 0$ are time-varying aggregate preference
+weights satisfying $\sum_{i=1}^{n} \alpha^{agg}_{i,t} = 1$, and
+$\sigma_i > 0$ is the good-specific relative risk aversion parameter,
+identical across households but varying freely across goods.
+
+\begin{assumption}[Diminishing Marginal Utility]
+The CRRA specification ensures $\partial^2 \hat{W}_t / \partial C_i^2
+= -\sigma_i\,\alpha^{agg}_{i,t}\,C_i^{-\sigma_i - 1} < 0$
+for all $i$ and $\sigma_i > 0$, consistent with standard consumer
+theory \citep{varian1992microeconomic}.
+\end{assumption}
+
+From utility maximisation subject to the budget constraint
+$\vec{P}_t^\top \vec{C}_t = Y_t$, the first-order condition
+$\alpha^{agg}_{i,t}\,C_i^{-\sigma_i} = \mu_t P_{i,t}$ yields the
+aggregate Marshallian demand (see equation~\eqref{eq:crra_demand}):
+%
+\begin{equation}\label{eq:demand}
+    C_{i,t} = \left(\frac{\alpha^{agg}_{i,t}}{\mu_t\,P_{i,t}}\right)^{1/\sigma_i},
+\end{equation}
+%
+where $\mu_t > 0$ is the marginal utility of income, common across
+households and goods within period $t$. We use a matrix which is
+called the distribution matrix; it converts the income from $n_f$
+firms to $n_h$ households. This matrix is called $\Phi$. It has the
+relationship of the form: $\vec{Y}_{h} = \Phi \vec{Y}_{f}$.
+
+
+\subsection{Revealed Demand Estimation}
+
+Following \citet{samuelson1948consumption}, we infer revealed demand
+from observed price and quantity data.
+To account for recent price changes, we apply an elasticity correction
+over the previous $\tau = 1,2,3$ sub-periods.
+
+\paragraph{Derivation of the correction bound.}
+Let the elasticity-corrected signal act multiplicatively on measured
+consumption so that the inferred demand for sector $i$ satisfies
+$\hat{C}_i \approx C_i / (1 - s_i)$.
+The implied sectoral growth rate is therefore
+%
+\begin{equation}
+    \hat{G}_i
+    \;=\; \frac{\hat{C}_i - C_i}{C_i}
+    \;=\; \frac{1}{1 - s_i} - 1
+    \;=\; \frac{s_i}{1 - s_i}.
+\end{equation}
+%
+For the Neumann expansion of the capital-accumulation equation to converge, the growth signal must satisfy
+$\hat{G}\cdot\rho(M) < 1$, where $M = B(I-\bar{A})^{-1}$ is the
+dynamic multiplier matrix.
+Substituting the expression for $\hat{G}_i$ and solving for $s_i$
+yields
+
+\begin{equation}
+    \frac{s_i}{1-s_i} < \frac{1}{\rho(M)}
+    \;\;\Longrightarrow\;\;
+    s_i < \frac{1}{\rho(M)+1}.
+\end{equation}
+
+This establishes $s_{\max} = 1/\bigl(\rho(M)+1\bigr)$ as the
+\emph{spectrally-derived} upper bound on the correction signal.
+Unlike an ad-hoc truncation level, this bound is computed once at
+calibration from the technology matrices $A$ and $B$, and updates
+automatically whenever the productive structure changes.
+
+\paragraph{Revealed demand estimator.}
+Replacing the free parameter $s_{\max}$ with the spectral bound, we
+define the correction signal for sector $i$ in sub-period $\tau$ as
+%
+\begin{equation}\label{eq:correction_signal}
+    s_{\tau,i,t}
+    \;=\;
+    -\,\mathrm{clamp}\!\left(
+        0,\;
+        \frac{1}{\rho(M)+1},\;
+        \epsilon_i\,\frac{\Delta P_{\tau,i,t}}{P_{i,t}}
+    \right),
+\end{equation}
+%
+and the revealed demand estimate is
+%
+\begin{equation}\label{eq:revealed_demand}
+    \hat{C}_{i,t-1}
+    \;=\;
+    \sum_{\tau=1}^{3}
+    \frac{C^{\mathrm{m}}_{\tau,t-1,i}}{1 - s_{\tau,i,t-1}},
+\end{equation}
+%
+where $\Delta P_{\tau,t-1,i} = P_{\tau,t-1,i} - P_{t-1,i}$ is the
+sub-period price deviation and $C^{\mathrm{m}}_{\tau,t-1,i}$ is
+measured consumption in sub-period $\tau$.
+For the CRRA demand system~\eqref{eq:demand}, the price elasticity is
+$\epsilon_i = -1/\sigma_i$, so the correction is good-specific and
+reflects the curvature of preferences over each good.
+The clamp is active precisely when the observed price deviation is
+large enough that the uncorrected signal would violate the Neumann
+convergence condition; in that regime the correction is saturated at
+the spectral bound rather than amplified further.
+
+\subsection{Growth Inference}
+
+Sectoral growth rates are inferred from revealed excess demand,
+following the principle that production should expand in sectors where
+demand exceeds supply:
+\begin{equation}\label{eq:growth_inference}
+    \hat{G}_{i, t} =  \frac{\hat{C}_{t-1, i} - C_{t-1, i}}{C_{t-1, i}}
+\end{equation}
+
+\subsection{Investment Feedback rule}
+
+Let $\hat{G}_{i,t}$ also denote the inferred growth rate defined in
+equation~\eqref{eq:growth_inference}.
+Truncating the Neumann expansion~\eqref{eq:finite_difference} to
+third order the change in capital is:
+%
+\begin{multline}\label{eq:investment_rule}
+     \Delta \vec{K}_{t}
+    = \left[M\,\hat{G}_{t} + M^{2}\hat{G}_{t}^{2} + M^3  \hat{G}^{3}\right]
+      \vec{C}_{t-1} \\ + \left[gM + g^2M^2 + g^3 M^3\right] \vec{G}_{t}
+\end{multline}
+%
+This rule adjusts the sectoral composition of capital accumulation in
+response to persistent deviations between planned and realized
+consumption, directing investment toward sectors where demand is
+systematically underestimated. This is effectively choosing the time derivatives of consumption to be equal to the positive components of the excess demand and the change in investment that would require. The relative error between the terms for change in capital shown here and the exact investment is given by the following: $ \text{relative error} \approx \mathcal{O}(g^{3} \cdot \rho(M)^{3})$

@@ -273,6 +273,8 @@ def calibrate(data: dict,
               price_tol: float = 0.005,
               max_price_iter: int = 25,
               n_firms: int = 5,
+              firm_shares: np.ndarray = None,
+              phi_matrix: np.ndarray = None,
               sigma_val: float = 1.0) -> ModelState:
     """
     Build a fully calibrated ModelState from the IO data dict.
@@ -379,8 +381,11 @@ def calibrate(data: dict,
 
     # Split K_0 across firms with near-equal stochastic shares
     B_dense = B.toarray()
-    shares = np.abs(np.random.normal(1.0/n_firms, 0.02, n_firms))
-    shares /= shares.sum()
+    if firm_shares is not None:
+        shares = firm_shares
+    else:
+        shares = np.abs(np.random.normal(1.0/n_firms, 0.02, n_firms))
+        shares /= shares.sum()
     # Split K_0 across firms using partitioned final demand (Vectorized)
     demand_total = C_0 + G_0 + dK_0
     
@@ -456,9 +461,12 @@ def calibrate(data: dict,
     # Ownership matrix W: (n_households, n_firms)
     # Columns sum to 1: each column is the distribution of one firm's income
     rng_hh = np.random.default_rng(123)
-    # dirichlet(size=n_firms) gives (n_firms, n_households) where rows sum to 1
-    # Transposing gives (n_households, n_firms) where COLUMNS sum to 1
-    state.W_ownership = rng_hh.dirichlet(np.ones(n_households), size=n_firms).T
+    if phi_matrix is not None:
+        state.W_ownership = phi_matrix.copy()
+    else:
+        # dirichlet(size=n_firms) gives (n_firms, n_households) where rows sum to 1
+        # Transposing gives (n_households, n_firms) where COLUMNS sum to 1
+        state.W_ownership = rng_hh.dirichlet(np.ones(n_households), size=n_firms).T
 
     # Per-household subsistence: removed
 
@@ -472,8 +480,15 @@ def calibrate(data: dict,
         a_h = np.maximum(a_h, 1e-30)
         a_h /= a_h.sum()
         alpha_h[h, :] = a_h
+    # Initialize households with Dirichlet ownership and preferences
     state.alpha_h = alpha_h
-    state.w_h = np.ones(n_households) / n_households # Uniform weights
+    
+    # Synchronize welfare weights (w_h) with the initial income distribution
+    if phi_matrix is not None and firm_shares is not None:
+        hh_income_raw = phi_matrix @ firm_shares
+        state.w_h = hh_income_raw / max(hh_income_raw.sum(), 1e-30)
+    else:
+        state.w_h     = np.ones(n_households) / n_households # Default: uniform 
     state.alpha_true_h = alpha_h.copy()
     state.alpha_slow_h = alpha_h.copy()
     state.alpha_habit_h = alpha_h.copy()

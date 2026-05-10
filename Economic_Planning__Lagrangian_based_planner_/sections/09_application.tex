@@ -1,0 +1,304 @@
+\section{Application}
+\label{sec:application}
+
+This section documents the dual ascent method
+used to solve the planner's optimisation problem~\eqref{eq:planning_problem}
+at each quarter of the simulation.
+It then establishes a systems-optimisation approach for the decentralised firm layer, where a set of local
+linear programmes allocate production across competing firms to maximise total income
+subject to distributed capital constraints, presents performance results on the 
+2022 Spanish input-output benchmark, and establishes a rigorous Two-Agent New Keynesian (TANK) model as a comparative baseline.
+It must be noted that the Spanish data is used as a proof of concept with real data, not as a counterfactual policy model.
+Spain's 2022 national accounts provide a well-documented, publicly available IO table with sufficient sectoral disaggregation $n = 65$ to constitute a realistic stress test of the planning algorithm's computational and stability properties.
+
+\subsection{Simulation Methodology}
+\label{subsec:methodology}
+
+
+\paragraph{Iterative solution to the Linear Input-Output Problem}
+
+For solving the production system we use an iterative Neumann series approximation instead of a full inversion because the matrix $(I- \bar{A})\\$ of the inversion is $\mathcal{O}(n^3)$ Therefore to reduce the complexity of the algorithm in time and space.
+
+\begin{equation}\label{eq:Iderative inversion}
+    \vec{X}^{(k)} = \bar{A}\vec{X}^{(k)} + \vec{F}
+\end{equation}
+In this approximation the time complexity is reduced to $\mathcal{O}(k \cdot n^2)$ and $\mathcal{O}(n^2)$ respectively.
+In the simulation this is done with the function \texttt{neumann\_apply!(  )} defined in the script \texttt{ModelCore.jl}.
+The same function is used with the transpose of the $\bar{A}^{\top}$ matrix to calculate the value of the $\vec{\pi}$ from $\vec{\lambda}_{K}$ and $\lambda_{L}$.
+The error in this method of approximation is the following: $\rho(A)^{K} \approx \varepsilon $ here $\varepsilon$ represents the error of the $\text{L}^{2}$ norm of $
+\| \vec{X}^{*} - \vec{X}^{(K)}\| = \varepsilon \| \vec{X}^{*} \|
+$ and $\text{K}$ is the maximum number of iterations used in calculation of the Neumann approximation.
+
+\paragraph{Simulation Methodology Overview}
+
+The simulation embeds a benevolent social planner inside a fully-specified
+heterogeneous multi-agent economy.
+The implementation is written in Python (orchestration, calibration,
+post-processing) with a compiled Julia backend (\texttt{ModelCore.jl})
+that performs all hot inner loops.
+To minimize cross-language overhead, we employ a \textbf{Vectorized Neumann Expansion}
+technique: during calibration, firm-level capital allocations are computed as a
+single batch matrix operation in Julia, reducing inter-process communication
+latency by $99\%$ compared to sequential firm loops.
+
+\paragraph{Calibration and initialisation.}
+The model is calibrated once from the 2022 Spanish National Accounts
+input-output table ($n = 65$ sectors), yielding the technology matrix
+$A$, the capital-requirement matrix $B$, the labour-coefficient vector
+$\vec{l}$, and the initial capital stock $K_0$.
+Per-household preference weights $\alpha^h$ are
+drawn from a Dirichlet distribution centred on the aggregate benchmark
+shares and calibrated so that household income, derived from a stochastic
+distribution matrix $\Phi_{h,f}$ over $n_{\text{firms}}$ firms, clears the
+initial goods market. In reality this matrix is governed by the relationships of how groups households and firms exchange incomes.
+
+\paragraph{Planner optimisation.}
+Given the effective resource bounds $\vec{K}_{\text{eff}}$ and $L_{\text{eff}}$
+net of investment pre-commitment, the planner solves the convex programme
+in~\eqref{eq:solver problem} via the Nesterov-accelerated dual ascent
+described in Sections~\ref{sec:model}--\ref{sec:optimization}.
+The solver is implemented natively in Julia as \texttt{solve\_planner\_native},
+which operates entirely in log-space to enforce non-negativity of shadow
+prices without explicit projection.
+Warm-start multipliers from the previous quarter are passed in whenever
+available, drastically reducing the iteration count after Q1.
+The solver returns the optimal consumption target $\vec{C}^*$, the gross
+output target $\vec{X}^*$, the sector-level shadow price vector $\vec{\pi}^*$,
+and the marginal utility of income $\mu^*$.
+
+\paragraph{Decentralised firm production.}
+Sectoral capital $\vec{K}$ is partitioned across $n_{\text{firms}}$ firms
+via a random draw that preserves aggregate sectoral totals.
+Each firm solves the local LP~\eqref{eq:firm_lp} natively on the Julia side
+using the \textbf{HiGHS Dual Simplex} solver.
+By offloading the entire sectoral firm-set as a block-angular constraint
+matrix to Julia, the simulation avoids the significant overhead of
+Python-based LP interfaces (e.g., SciPy).
+This allows for the simultaneous optimization of 250 independent firms
+within milliseconds.
+The alignment between planner targets ($\vec{X}^*$) and realised
+production ($\vec{X}_{\text{actual}}$) is maintained via a
+strict $0.1\%$ primal tolerance.
+
+\paragraph{Income distribution and household demand.}
+Firm nominal incomes $Y_f = \vec{v}_{\text{eff}}^\top \vec{X}_f$, where
+$\vec{v}_{\text{eff}}$ is calibrated from the first-period shadow weights
+so that aggregate income equals initial GDP, are distributed to
+$n_h$ households via the distribution matrix:
+$Y_h = \sum_f \Phi_{h,f} Y_f$.
+Each household $h$ maximises a CRRA utility function with preference
+weight vector $\alpha^h$ and good-specific curvature parameters
+$\sigma_i$, yielding individual demand
+$C_{h,i,t} = (w_h\,\alpha_{i,t,h}/(\mu_t P_{i,t}))^{1/\sigma_i}$.
+Aggregate household demand is then cleared against the
+physical supply $\vec{C}_{\text{actual}} = (I{-}\bar{A})\vec{X}_{\text{actual}}
+- \Delta\vec{K} - \vec{G}$.
+
+\paragraph{Capital accumulation and state update.}
+Realised gross investment equals the residual of actual output after
+netting consumption, government spending, and intermediate demand.
+Each firm's capital stock is updated by the standard law of motion:
+\begin{equation}
+  K_{f,i,t+1} = (1 - \delta) K_{f,i,t} + I_{f,i,t},
+\end{equation}
+with $\delta = 0.01$ per quarter.
+Investment is distributed across firms in proportion to their capital
+shares, preserving the block-angular structure of firm balance sheets.
+Aggregate capital is recovered as $K_{i,t+1} = \sum_f K_{f,i,t+1}$,
+and an accounting identity check $\vec{K} \equiv \sum_f \vec{K}_f$
+is enforced after every quarter.
+
+\paragraph{Planner preference update.}
+At the close of each quarter the planner updates its aggregate preference
+estimate by incorporating the revealed preference signal from the
+tâtonnement (equation~\eqref{eq:preference_update}), adding an $\varepsilon$-floor of $10^{-5}$ to prevent
+zero-weight sectors, and renormalising to the simplex.
+The evolution of the planner's estimate and its distance from the true
+(unobserved) household preferences are tracked via the $\ell^2$- and
+$\ell^\infty$-norm gaps, which remain bounded throughout the 20-quarter
+horizon (Section~\ref{sec:price_dynamics}).
+
+\subsection{Planner's Problem Formulation}
+
+Substituting the growth-augmented technology and investment
+pre-commitment of Sections~\ref{sec:model}--\ref{sec:optimization},
+the planner's quarterly problem reduces to:
+%
+\begin{align}\label{eq:solver problem}
+\max_{\vec{C}\geq \vec{0}} \quad & \sum_i \alpha^{agg}_i
+  \,\frac{C_i^{1-\sigma_i}}{1-\sigma_i} \notag \\
+  \quad\text{s.t.}\quad
+  & M\vec{C} \leq \vec{K}_{\mathrm{eff}},\quad
+  \vec{P}_{L} \cdot \vec{C} \leq L_{\mathrm{eff}},
+\end{align}
+%
+where $M = B(I-\bar{A})^{-1}$ is the capital-requirement matrix
+applied directly to consumption,
+$\vec{K}_{\mathrm{eff}} = \vec{K}_t - M (\Delta\vec{K}_t + \vec{G}_{t})$ and
+$L_{\mathrm{eff}} = L - \vec{P}_{L} \cdot ( \Delta\vec{K}_t + \vec{G}_{t})$
+are resource bounds net of investment pre-commitment, and
+$\vec{P}_{L} = (I-\bar{A})^{-\top}\vec{l}$ is the
+transformed labour coefficient vector precomputed once at calibration.
+
+This is a convex programme: the objective is strictly concave (since
+$\sigma_i > 0$ implies $\partial^2/\partial C_i^2 < 0$ for all $i$)
+and the feasible set is a convex polytope, so the unique global maximiser exists
+whenever the feasible set is non-empty \citep{boyd2004convex}.
+
+\subsection{Dual Formulation and Stationarity}
+
+Rather than solving the primal problem directly, the algorithm operates on the dual.
+By associating non-negative Lagrange multipliers (shadow prices) $\vec{\lambda}_K \in \mathbb{R}^n_+$ and $\lambda_L \in \mathbb{R}_+$ with the capital and labour constraints respectively, we form the Lagrangian:
+%
+\begin{multline} \label{eq:lagrangian effective}
+  \mathcal{L}(\vec{C}, \vec{\lambda}_K, \lambda_L) = \hat{W}(\vec{C})
+     - \vec{\lambda}_K^\top \bigl(M\vec{C} - \vec{K}_{\mathrm{eff}}\bigr)\\
+    - \lambda_L \bigl(\vec{P}_{L} \cdot \vec{C} - L_{\mathrm{eff}}\bigr).
+\end{multline}
+%
+Taking the derivative with respect to consumption $C_i$ and setting to zero yields the closed-form first-order condition (FOC):
+%
+\begin{multline} \label{eq:foc}
+     \alpha^{agg}_i\,C_i^{-\sigma_i} - \bigl(M^\top \vec{\lambda}_K\bigr)_i - \lambda_L P_{L, i} = 0 \\
+     \implies \
+     C_i = \left(\frac{\alpha^{agg}_i}{\pi_i}\right)^{1/\sigma_i},
+\end{multline}
+%
+where $\pi_i = (M^\top \vec{\lambda}_K)_i + \lambda_L P_{L,i}$ is the
+implied final-demand shadow price of good $i$, and correspondingly
+$\mu_t = \pi_i / P_{i,t}$ is the marginal utility of income, common
+across goods and households at the optimum.
+
+\subsection{Multiplicative Nesterov-Accelerated Dual Ascent}
+
+The dual function $g(\vec{\lambda}_K, \lambda_L) = \max_{\vec{C}} \mathcal{L}(\vec{C}, \vec{\lambda}_K, \lambda_L)$ is minimized over $\vec{\lambda} \geq 0$ to find the optimum shadow prices.
+We employ an accelerated dual-ascent scheme using \textbf{Nesterov momentum} applied to the multipliers in log-space. This approach, known as \textbf{Multiplicative Dual Ascent}, ensures that shadow prices remain strictly positive without requiring explicit projection steps.
+
+The solver maintains a state in log-space $\theta_i = \ln \lambda_i$. At each iteration $k$, we evaluate the gradients at an extrapolated point $\vec{y}^{(k)}$, where the log-gradients correspond to the normalized physical slacks:
+%
+\begin{equation}\label{eq:slacks}
+  g_{K,j}^{(k)} = -\frac{s_{K,j}}{K_{\mathrm{eff},j}}, \quad
+  g_L^{(k)} = -\frac{s_L}{L_{\mathrm{eff}}},
+\end{equation}
+%
+where $\vec{s}_K = \vec{K}_{\mathrm{eff}} - M\vec{C}(\vec{y})$ and $s_L = L_{\mathrm{eff}} - \vec{P}_{L} \cdot \vec{C}(\vec{y})$.
+The shadow prices are updated via a fixed-step gradient descent in log-space:
+%
+\begin{align}\label{eq:dual_update}
+  \ln \lambda_{K,j}^{(k+1)} &= \ln y_{K,j}^{(k)} + \sigma^{(k)} \eta_K g_{K,j}^{(k)} \notag \\
+  \ln \lambda_{L}^{(k+1)} &= \ln y_{L}^{(k)} + \sigma^{(k)} \eta_L g_L^{(k)},
+\end{align}
+%
+where the base learning rates $\eta_K \approx 0.4$ and $\eta_L \approx 0.5$ are dynamically scaled by a factor $\sigma^{(k)}$ determined via a \textbf{backtracking line search} on the dual objective value.
+
+To prevent momentum-driven oscillations near the capacity singularities, we implement an \textbf{Adaptive Gradient Restart} rule. The effective iteration counter $k$ is reset to unity ($k = 1$) whenever the extrapolation direction works against the current gradient signal:
+%
+\begin{equation}
+  \langle \ln \vec{y}^{(k)} - \ln \vec{\lambda}^{(k)}, \vec{g}^{(k)} \rangle < 0 \implies \text{Restart}.
+\end{equation}
+%
+Otherwise, the look-ahead point is generated via the standard Nesterov recurrence:
+\begin{multline}\label{eq:extrapolation}
+  \ln y_{i}^{(k+1)} = \ln \lambda_i^{(k+1)} + \\\left(\frac{k - 1}{k + 2}\right) \bigl(\ln \lambda_i^{(k+1)} - \ln \lambda_i^{(k)}\bigr).
+\end{multline}
+This formulation allows the solver to handle sectors with vastly different capital intensities unit-invariantly, as the log-space steps represent relative price adjustments (percentage changes) proportional to sectoral over-utilization.
+
+
+\paragraph{Complexity per Matrix-Vector Operation (MVP).}
+Each iteration of~\eqref{eq:dual_update} requires at least \textbf{two Neumann Applications}: one forward operator call $\mathcal{M}(\vec{C})$ and one adjoint call $\mathcal{M}^\top(\vec{\lambda})$. Each Neumann application of order $k$ corresponds to $k$ atomic \textbf{Matrix-Vector Products (MVPs)} of the technology matrix $A$. The total computational effort per quarter is tracked via cumulative Neumann calls (typically \textbf{100--250}) and total atomic MVPs (typically \textbf{2,000--5,000} for $k=20$).
+\subsection{Convergence Criteria}
+
+The iterative loop monitors the physical constraint violations and checks for mathematical stabilization.
+
+\paragraph{KKT Tolerance.}
+The algorithm terminates successfully if both the dual complementarity and primal feasibility conditions are satisfied at a high-precision threshold (typically $10^{-4}$ or $10^{-5}$):
+\begin{align}
+  \text{Dual: } & \lambda_{L}^{(t)} |s_L| \leq \text{tol}_d, \quad \lambda_{K,j}^{(t)}|s_{K,j}| \leq \text{tol}_d \\
+  \text{Primal: } & \frac{|s_L|}{L_{\text{eff}}} \leq \text{tol}_p, \quad \frac{| s_{K,j}|}{K_{\text{eff},j}} \leq \text{tol}_p
+\end{align}
+where $s_L$ and $\vec{s}_K$ are the slacks net of resource bounds.
+
+\subsection{Empirical Complexity Study of the Optimisation Kernel}
+\label{subsec:scaling}
+
+To verify the theoretical complexity of the dual-ascent solver independently of
+the full simulation stack, we provide a standalone Julia script \texttt{scaling.jl}.
+This script is a purpose-built empirical scaling study of
+\texttt{solve\_planner\_general}---a dimensionally unrestricted replica of the
+production solver \texttt{solve\_planner\_native} in \texttt{ModelCore.jl}---and
+has no dependency on the simulation's calibration data or agent layer.
+
+\paragraph{Experimental design.}
+The script generates a sequence of synthetic central-planning problems with
+problem dimension $n \in \{1{,}000,\, 2{,}000,\, \ldots,\, 10{,}000\}$.
+For each $n$, it constructs a pair of $n \times n$ sparse matrices: a Leontief
+technology matrix $A$ (spectral radius $\approx 0.15$) and a capital-requirements
+matrix $B$, both at density $7.5\,\%$, well below the $10\,\%$ threshold at which
+sparse arithmetic retains its asymptotic advantage.  All remaining inputs
+(preference weights $\boldsymbol{\alpha}$, curvature parameters $\boldsymbol{\sigma}$,
+labour coefficients $\boldsymbol{P_L}$,
+capital supply $\boldsymbol{K}$, government demand $\boldsymbol{G}$, and
+warm-start duals) are drawn from calibrated random distributions that reflect the
+structure of realistic IO data.  A single JIT warm-up pass on a $50$-sector toy
+problem is executed before the timed loop so that Julia compilation costs are
+excluded from all measurements.
+
+\paragraph{Measured quantities.}
+For each $n$ the script records:
+\begin{itemize}
+  \item \textbf{Iteration count} --- the number of Nesterov AGD steps required
+        to satisfy the KKT tolerance $\varepsilon = 10^{-4}$, subject to a
+        ceiling of $2{,}000$ iterations.
+  \item \textbf{Wall-clock time} --- the elapsed time (seconds) from the first
+        gradient evaluation to solver return, measured via Julia's \texttt{time()}.
+\end{itemize}
+Both quantities are saved as a combined figure:
+\texttt{complexity\_scaling\_fit.png} shows wall-clock time with a high-precision 
+quadratic fit and the corresponding regression equation.
+
+\paragraph{Complexity findings.}
+A quadratic polynomial $t(n) = a n^2 + b n + c$ is fitted by
+ordinary least squares to the wall-clock measurements.
+The resulting regression found $a \approx 9.20 \times 10^{-7}$, $b \approx -3.59 \times 10^{-3}$, and $c \approx 4.82$.
+The dominant quadratic term confirms that the total arithmetic complexity of the
+CRRA solver kernel grows as $\mathcal{O}(n^2)$ for the constant-density sparse problem
+instances ($d = 15\%$) examined. This matches the theoretical cost of the
+sparse matrix--vector products ($O(d n^2)$) and indicates that the Nesterov iteration count remains roughly stable as the problem scales, 
+ensuring the system remains performant for large-scale economic planning.
+
+\subsection{Decentralised Firm Production and Household Income Distribution}
+
+To model a distributed economy, production is not computed as a single macroeconomic aggregate. Instead, sectoral capital is partitioned across $f = 1 \dots n_{\text{firms}}$ independent firms. Each firm is endowed with private capital $\vec{K}_f$ and a proportional labour endowment $L_f$.
+
+Due to the linear nature of the value-added objective, the classical optimisation of $\vec{v}_{\text{eff}}^\top \vec{x}_f$ exhibits non-unique optima on a flat optimal face. To mathematically emulate an \textit{Optimum Hopping} mechanism---where firms select the unique vertex combination that maximally aligns with the planner's physical output targets $\vec{X}^*$---we construct a Lexicographic Linear Programme. The tie-breaker is implemented via an $L_1$ penalty using auxiliary variables $\vec{u}_f$:
+
+\begin{align}\label{eq:firm_lp}
+\max_{\vec{x}_f \geq 0,\, \vec{u}_f \ge 0} &\quad \vec{v}_{\text{eff}}^\top \vec{x}_f - \epsilon \sum_i u_{f,i} \\
+\text{s.t.} &\quad B \vec{x}_f \leq \vec{K}_f \notag\\
+            &\quad u_{f,i} \geq \| x_{f,i} - (\text{share}_f \cdot X^*_i) \| \notag\\
+\end{align}
+
+Here, $\epsilon$ is chosen sufficiently small (e.g., $10^{-3}$) such that it acts strictly as a tie-breaker on the optimal face. By penalising the Manhattan distance to the proportional target, the solver algorithmically finds the unique convex combination of optimal vertices that spans $\vec{X}^*$.
+
+The total nominal income generated by these firms, $Y_{\text{firm}} = \sum_f \vec{v}_{\text{eff}}^\top \vec{x}_f$, is then distributed heterogeneously to $h = 1 \dots n_h$ households. This distribution is governed by a stochastic ownership matrix $\Phi_{h,f}$, such that each household's income is derived from its dividend share of firm revenues: $Y_h = \sum_f \Phi_{h,f} Y_f$. Consumer demand is then computed at the individual household level using the CRRA demand system~\eqref{eq:demand},
+$C_{h,i,t} = (w_h\,\alpha_{i,t,h}/(\mu_t P_{i,t}))^{1/\sigma_i}$,
+and dynamically clears against the actual production achievable by the firms $\vec{C}_{\text{actual}} = (I-\bar{A})\vec{X}_{\text{actual}} - (\Delta \vec{K} + \vec{G})$ during the monthly price tâtonnement.
+
+\subsection{Benchmarking Against Decentralised Markets: The HANK Reference}
+\label{subsec:hank_benchmark}
+
+To evaluate the efficiency of the cybernetic planner, we contrast it with a high-fidelity \textbf{Heterogeneous Agent New Keynesian (HANK)} model operating on the same 65-sector Spanish input-output structure. In this benchmark, the terminal supply constraints enforced by the planner are replaced by a feedback-driven market coordination mechanism governed by independent households, price-setting firms, and a central bank.
+
+\paragraph{Household Heterogeneity and Liquidity.}
+The HANK benchmark simulates $1{,}000$ independent households experiencing idiosyncratic labor income risk (AR(1) process in logs, $\rho = 0.97$). Households are initialized with a Spanish-calibrated wealth distribution ($\text{Gini} \approx 0.67$) and face a hard borrowing constraint ($a \geq 0$). This creates a realistic distribution of \textbf{Marginal Propensities to Consume (MPC)}: households near the liquidity floor exhibit an MPC of $1.0$ (effectively Hand-to-Mouth), while wealthier households smooth consumption via an Euler equation.
+
+\paragraph{NK Pricing and Monetary Policy.}
+Each of the 65 sectors is modelled as a set of monopolistically competitive firms setting prices via a log-linearised \textbf{Rotemberg Phillips Curve}. Sectoral inflation $\pi_{i,t}$ is driven by real marginal costs---comprising both labor and intermediate input requirements from the $A$ matrix---relative to a steady-state markup. The nominal interest rate $i_t$ is set by a central bank following an inertial Taylor rule:
+\begin{equation}
+  i_t = \rho_i i_{t-1} + (1 - \rho_i) \bigl[ r_{ss} + \phi_{\pi} (\pi_t - \pi^*) + \phi_y (y_t - y^*) \bigr],
+\end{equation}
+where $\pi_t$ is aggregate Laspeyres inflation and $y_t - y^*$ is the output gap relative to potential growth. The real rate $r_t$ is derived via the Fisher approximation.
+
+
+\paragraph{Uncoordinated Capital Feedback.}
+While the planner strictly enforces $K \ge BX$ as a terminal constraint, the TANK benchmark models investment as a reactive feedback loop. Firms demand new capital $\Delta K$ based on current output utilization signals. This creates a reflexive multiplier: higher consumption demands higher investment, which in turn raises nominal income and further stimulates consumption. This "soft" capital adjustment often leads to higher raw GDP growth ($15.5\%$ vs $12.3\%$) at the cost of significant allocative inefficiency, as sectors over-produce goods that are mismatched with the true (unobserved) preference weights $\alpha^h$, ultimately yielding an $8.3\%$ welfare penalty relative to the cybernetic planner.

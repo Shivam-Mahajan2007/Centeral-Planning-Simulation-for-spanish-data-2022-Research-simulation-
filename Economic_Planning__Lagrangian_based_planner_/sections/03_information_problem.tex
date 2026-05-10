@@ -1,0 +1,201 @@
+\section{The Information Problem and Preference Discovery} \label{sec:information}
+
+\subsection{The Planner's Information Constraint}
+
+A central difficulty in any system of economic planning is the
+information problem emphasised in the socialist calculation debate
+\citet{vonmises1920, hayek1945use}. In particular, the planner does
+not observe the true utility function of households, nor the
+underlying demand curves that govern consumption choices.
+
+Let the true but unobserved utility function of households be
+
+\[
+W^*(\vec{C}) = W^*(C_1, \dots, C_n).
+\]
+
+The planner does not know the functional form of $W^*$, nor the
+associated Marshallian demand functions $C_i^*(P, Y)$. Without this
+information, the planner cannot directly solve the standard welfare
+maximisation problem. Any implementable planning system must therefore
+rely on a procedure for inferring consumer preferences from observable
+behaviour.
+
+\subsection{Ansatz Demand Specification}
+
+To make the problem tractable, the planner adopts an ansatz for the
+functional form of demand. Specifically, demand is approximated as
+arising from a Constant Relative Risk Aversion (CRRA) utility
+structure, in which each good $i$ carries a good-specific elasticity
+parameter $\sigma_i > 0$, common across all households. The
+resulting Marshallian demand for household $h$ takes the form:
+
+\[
+C_{h,i,t} = \left(\frac{w_h\,\alpha_{i,t,h}}{\mu_t\, P_{i,t}}\right)^{1/\sigma_i},
+\]
+
+where $\mu_t > 0$ is the marginal utility of income, common across
+households and goods within period $t$, $\alpha_{i,t,h} > 0$ is a
+time-varying preference weight for household $h$ over good $i$, and
+$\sigma_i > 0$ is the good-specific relative risk aversion parameter.
+Note that $\sigma_i$ is assumed identical across households but varies
+freely across goods. This form is derived from utility maximisation of
+a CRRA surrogate subject to the budget constraint
+$\vec{P}_t^\top\vec{C}_{h,t} = Y_{h,t}$.
+
+Aggregating across households, the aggregate demand for good $i$
+satisfies:
+
+\[
+C_{i,t} = \sum_{h=1}^{n_h} C_{h,i,t}
+         = \frac{1}{(\mu_t P_{i,t})^{1/\sigma_i}}
+           \sum_{h=1}^{n_h} (w_h\,\alpha_{i,t,h})^{1/\sigma_i}.
+\]
+
+Defining the aggregate preference weight via the CES aggregation:
+\[
+\alpha^{agg}_{i,t} \;\equiv\; \left[\sum_{h=1}^{n_h}
+  (w_h\,\alpha_{i,t,h})^{1/\sigma_i}\right]^{\!\sigma_i},
+\]
+
+aggregate demand takes the compact form:
+
+\begin{equation}\label{eq:crra_demand}
+C_{i,t} = \left(\frac{\alpha^{agg}_{i,t}}{\mu_t\, P_{i,t}}\right)^{1/\sigma_i}.
+\end{equation}
+
+The planner does not assert that true preferences are exactly CRRA;
+rather, the weights $\alpha^{agg}_{i,t}$ are interpreted as a
+parametric approximation to the unknown demand system, updated locally
+in each period.
+
+The key informational problem is therefore reduced to estimating the
+vector
+
+\[
+\vec{\alpha}^{agg}_t = (\alpha^{agg}_{1,t},\dots,\alpha^{agg}_{n,t}),
+\]
+
+which evolves as the underlying preference structure changes. The
+planner thus does not solve a full-information welfare maximisation
+problem. Instead, the system implements a recursive adaptive control
+process in which the working objective function is continuously
+revised through parametric updating.
+
+\subsection{Approximate Utility Maximisation}
+
+Because the true utility function is unknown, the planner maximises a
+CRRA surrogate using the current parameter estimate:
+
+\[
+{W}^{*}_t( \vec{w}_{h},\vec{C}_{h})
+= \sum_{h = 1}^{n_{h}} w_{h}
+  \left(\sum_{i=1}^n \alpha_{i,t,h}
+        \,\frac{C_{h,i}^{1-\sigma_i}}{1-\sigma_i}\right)
+\]
+
+The resulting optimal consumption plan $\vec{C}^*_t$ is therefore
+optimal only relative to the current approximation $\hat{W}_t$, not
+necessarily relative to the true but unobserved preferences $W^*$.
+This distinction is consequential: the plan is the best the planner
+can do given available information, but it need not coincide with the
+first-best social optimum. After each planning period, the realised
+pattern of consumption provides new information about the true demand
+structure, and the approximation is revised accordingly.
+
+Here, we employ an approximate welfare function of the form:
+
+\begin{equation}\label{eq:crra_welfare}
+\hat{W}_t(\vec{C})
+= \sum_{i=1}^n \alpha^{agg}_{i,t}
+  \,\frac{C_{i}^{1-\sigma_i}}{1-\sigma_i}
+\end{equation}
+
+The marginal utility of aggregate consumption with respect to good $i$
+is:
+\[
+\frac{\partial \hat{W}_t}{\partial C_i}
+= \alpha^{agg}_{i,t}\, C_i^{-\sigma_i},
+\]
+and the marginal utility of income $\mu_t$ equates this to the shadow
+price of good $i$:
+\[
+\mu_t \,P_{i,t} = \alpha^{agg}_{i,t}\, C_i^{-\sigma_i} = \pi_i,
+\]
+consistently with equation~\eqref{eq:crra_demand}.
+
+\subsection{Parametric Preference Updating}
+
+Within each planning cycle, prices adjust in response to excess demand
+through the adjustment process described in Section~\ref{sec:dynamics}.
+These price signals induce households to adjust their consumption
+bundles, and observed expenditure patterns thereby contain information
+about the underlying preference structure.
+
+At the CRRA optimum, the first-order condition
+$\alpha^{agg}_{i,t}\,C_i^{-\sigma_i} = \mu_t P_{i,t}$ implies:
+
+\[
+\frac{P_{i,t}\,(C_{i,t})^{\sigma_i}}{\displaystyle\sum_j P_{j,t}\,(C_{j,t})^{\sigma_j}}
+= \frac{\alpha^{agg}_{i,t}}{\displaystyle\sum_j \alpha^{agg}_{j,t}}
+= \alpha^{agg}_{i,t},
+\]
+
+where the last equality uses $\sum_i \alpha^{agg}_{i,t} = 1$.
+Motivated by this relationship, the planner updates the preference
+weights using observed marginal-utility-weighted expenditure shares:
+
+\begin{equation} \label{eq:preference_update}
+\alpha^{agg}_{i,t+1}
+=
+\frac{1}{3}\sum_{\tau = 1}^{3}
+\frac{P_{t, \tau, i}\bigl(C^{m}_{\tau, t, i}\bigr)^{\sigma_i}}
+     {\displaystyle\sum_j P_{t,\tau,j}\,\bigl(C^{m}_{\tau, t, j}\bigr)^{\sigma_j}}
+\end{equation}
+
+By construction this rule ensures $\sum_i \alpha_{i,t+1} = 1$ and
+$\alpha_{i,t+1} > 0$ for all $i$, since all terms are non-negative and
+the denominator is strictly positive. When $\sigma_i = 1$ for all
+$i$, the rule reduces to ordinary expenditure shares, recovering the
+Cobb--Douglas special case. Note that $\sigma_i$ enters the update
+rule directly, so good-specific curvature is accounted for in the
+revealed-preference inference.
+
+It is important to note the limits of this updating rule. For a true
+CRRA preference structure, the marginal-utility-weighted expenditure
+shares are identically equal to $\alpha^{agg}_{i,t}$, so the rule
+recovers the true parameters exactly. For any other preference
+structure, the rule converges to the CRRA approximation that best fits
+observed expenditure patterns, which will in general differ from the
+true preference parameters. The persistent but bounded gap between
+$\vec{\alpha}_t$ and the true preference vector is therefore a
+structural feature of the approximation rather than a transient
+estimation error, and is in fact the engine of the growth mechanism
+described in Section~\ref{sec:growth}.
+
+\subsection{A Cybernetic Preference Discovery Process}
+
+The resulting system operates as a recursive preference approximation
+mechanism. Each planning cycle performs three steps:
+
+\begin{enumerate}
+\item The planner computes an approximate optimal production plan
+  using the current parameter estimate $\vec{\alpha}_t$.
+\item Prices adjust through the t\^{a}tonnement process, generating
+  observable consumption outcomes.
+\item The parameter vector $\vec{\alpha}_t$ is updated from observed
+  marginal-utility-weighted expenditure shares, revising the planner's
+  approximation of consumer demand.
+\end{enumerate}
+
+Over time, this process functions as a cybernetic feedback system that
+continuously adjusts the planning objective toward consistency with
+observed household behaviour. Rather than requiring prior knowledge of
+the utility function, the system refines its working approximation
+adaptively. What the price signals reveal, in precise terms, is the
+direction and magnitude of the gap between the current CRRA
+approximation and the true demand structure --- information that is
+then used to redirect investment toward sectors where demand is
+systematically underestimated. This is a more limited claim than full
+preference recovery, but it is sufficient for the adaptive planning
+mechanism to function.

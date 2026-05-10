@@ -1,0 +1,51 @@
+\section{The Two-Loop Cybernetic Algorithm}
+\label{sec:algorithm}
+The complete planning system operates through two nested loops inspired
+by hierarchical control theory \citep{mesarovic1970theory}.
+\subsection{Fast Adjustment Loop (Monthly)}
+\begin{algorithm}[H]
+\caption{Monthly Price Adjustment Loop}
+\label{alg:fast}
+\begin{algorithmic}[1]
+\STATE Initialize prices $\vec{P}_{t,0} = \vec{\pi}_t / \mu_t$
+       (Eq.~\ref{eq:price_proportional}).
+\STATE Set consumption plan $\vec{C}^{\mathrm{m}}_{\tau,t} =
+       \tfrac{1}{3}\vec{C}_t$ for all $\tau$.
+\FOR{$\tau = 1$ \TO $3$}
+    \STATE Compute excess demand
+           $\vec{Z}_{\tau,t} = \vec{C}_{\tau,t}(\vec{P}_t)
+           - \vec{C}^{\mathrm{m}}_{\tau,t}$.
+    \STATE Update prices via t\^{a}tonnement
+           (Eq.~\ref{eq:tatonnement}).
+    \STATE Record realized consumption $\vec{C}^{\mathrm{actual}}_\tau$.
+\ENDFOR
+\STATE Compute revealed demand
+       $\hat{\vec{C}}_t = \sum_{\tau} \vec{C}^{\mathrm{actual}}_\tau$
+       for next quarter.
+\end{algorithmic}
+\end{algorithm}
+\subsection{Slow Structural Loop (Quarterly)}
+\begin{algorithm}
+\caption{Quarterly Planning Loop}
+\label{alg:slow}
+\begin{algorithmic}[1]
+\STATE Compute revealed demand $\hat{\vec{C}}_t$ from prices and income
+       (Eq.~\ref{eq:revealed_demand}).
+\STATE Infer sectoral growth rates $\hat{G}_t$
+       (Eq.~\ref{eq:growth_inference}).
+\STATE Construct augmented matrix $\bar{A} = A + \delta B$
+       (Eq.~\ref{eq:A_bar}).
+\STATE Solve constrained optimization~\eqref{eq:planning_problem}
+       to obtain $\vec{C}_t^*$, $\vec{X}_t^*$, $\vec{\pi}_t^*$, $\mu_t^*$.
+\STATE Extract implicit investment
+       $\vec{I}_t = (I - A)\vec{X}_t^* - (\vec{C}_t^* + \vec{G}_t )$.
+\STATE Update capital stock
+       $\vec{K}_{t+1} = (1-\delta)\vec{K}_t + \vec{I}_t$
+       (Eq.~\ref{eq:capital_accumulation}).
+\STATE Compute household income $Y_t$ and marginal utility of income $\mu_t$
+       (Eq.~\ref{eq:mu_determination}).
+\STATE \textbf{Invoke Fast Loop} for $\tau = 1,2,3$ months.
+\STATE Update preferences $\boldsymbol{\alpha}_{t+1}$ from realized
+       consumption (Eq.~\ref{eq:preference_update}).
+\end{algorithmic}
+\end{algorithm}

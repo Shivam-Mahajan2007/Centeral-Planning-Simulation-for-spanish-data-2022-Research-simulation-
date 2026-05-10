@@ -418,6 +418,14 @@ def run_quarter(state: ModelState) -> ModelState:
         RRMSE          = rrmse,
     )
 
+    # --- Planner optimal household allocation ------------------------------------
+    # Under CRRA, optimal C_{h,i}^* = (w_h * alpha_{h,i} / pi_i)^{1 / sigma_i}
+    C_h_star_raw = (state.w_h[:, None] * state.alpha_true_h / np.maximum(pi[None, :], 1e-15)) ** (1.0 / state.sigma_vec[None, :])
+    # Scale to exactly match aggregate C_star (in case of slight numerical drift)
+    C_h_sum = C_h_star_raw.sum(axis=0)
+    scale_factor = np.where(C_h_sum > 1e-30, C_star / C_h_sum, 1.0)
+    C_h_star = C_h_star_raw * scale_factor[None, :]
+
     if slim:
         state.history.append({**common,
             **dict(
@@ -429,6 +437,10 @@ def run_quarter(state: ModelState) -> ModelState:
                 K_total        = float((state.P * state.K).sum()),
                 G_mean         = float(G_hat.mean()),
                 G_max          = float(G_hat.max()),
+                # Keep household metadata and per-household optimal consumption
+                alpha_true_h   = state.alpha_true_h.copy(),
+                w_h            = state.w_h.copy(),
+                C_h_star       = C_h_star.copy(),
             )
         })
     else:
@@ -444,6 +456,9 @@ def run_quarter(state: ModelState) -> ModelState:
                 pi_star        = pi.copy(),
                 alpha          = state.alpha.copy(),
                 alpha_true     = state.alpha_true.copy(),
+                alpha_true_h   = state.alpha_true_h.copy(),
+                w_h            = state.w_h.copy(),
+                C_h_star       = C_h_star.copy(),
                 G_hat_mean     = float(G_hat.mean()),
                 CPI            = state.CPI_chained,
             )
