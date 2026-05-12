@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 from juliacall import Main as jl
 
-# -- Load model ---------------------------------------------------------------
+# -- Load models ---------------------------------------------------------------
 JULIA_CORE = Path(__file__).parent / "model_core.jl"
+JULIA_MACGE_CORE = Path(__file__).parent / "CGE" / "ma_model_core.jl"
 
 def _load_core():
     # Only include the file if the Module isn't already defined to avoid constant redefinition errors
@@ -31,11 +32,28 @@ def _load_core():
     jl.seval("using Random")
     return core
 
+def _load_macge_core():
+    # Only include the file if the Module isn't already defined to avoid constant redefinition errors
+    jl.seval(f"""
+        if !isdefined(Main, :MACGECore)
+            include("{str(JULIA_MACGE_CORE)}")
+        end
+    """)
+    macge_core = jl.MACGECore
+    return macge_core
+
 try:
     CORE = _load_core()
     logger.info("Julia Core Engine loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Julia Core Engine: {e}")
+    raise
+
+try:
+    MACGE_CORE = _load_macge_core()
+    logger.info("Julia MA-CGE Core Engine loaded successfully.")
+except Exception as e:
+    logger.error(f"Failed to load Julia MA-CGE Core Engine: {e}")
     raise
 
 # -- Helpers ------------------------------------------------------------------
