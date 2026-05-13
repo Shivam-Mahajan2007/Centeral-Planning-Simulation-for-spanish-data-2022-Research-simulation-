@@ -1,0 +1,815 @@
+\documentclass[12pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{enumitem}
+\usepackage{bbm}
+
+% Page geometry
+\geometry{
+  margin=1in,
+  includeheadfoot
+}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Custom commands
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\text{Var}}
+
+% Title information
+\title{Market-Based CGE Model with Dynamic Input-Output Structure:\\A Decentralized Alternative to Cybernetic Planning}
+\author{Comparative Analysis Framework}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We develop a decentralized market-based Computable General Equilibrium (CGE) model that parallels the cybernetic planning framework of constraint-optimal dynamic input-output planning. The model maintains identical technological structure (dynamic Leontief production with capital accumulation) and household preferences (CRRA utility with good-specific curvature) but replaces centralized optimization with competitive market mechanisms. This specification enables direct comparison of coordination systems: shadow-price-guided planning versus market price discovery. The framework explicitly models household heterogeneity, factor markets, investment expectations, and preference dynamics, providing a rigorous benchmark for evaluating allocative efficiency, welfare outcomes, and growth trajectories under alternative coordination mechanisms.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+This document presents a complete mathematical specification of a market-based CGE model designed to serve as a comparative baseline for cybernetic economic planning systems. While the planner solves a constrained optimization problem to determine production and allocation, this model allows decentralized agents—households, firms, and markets—to coordinate through price signals.
+
+The key features of this CGE model are:
+\begin{itemize}
+    \item \textbf{Identical technology}: Dynamic Leontief structure with augmented matrix $\bar{A} = A + \delta B$
+    \item \textbf{Heterogeneous households}: Multiple agents with idiosyncratic preferences and capital ownership
+    \item \textbf{Market coordination}: Competitive price-taking firms and Walrasian market clearing
+    \item \textbf{Adaptive expectations}: Investment responds to revealed demand signals
+    \item \textbf{Preference evolution}: Same marginal-utility-weighted updating as in the planning model
+\end{itemize}
+
+This specification enables rigorous comparison of welfare, efficiency, and stability between centralized and decentralized coordination.
+
+\section{Technological Structure}
+
+The production technology is identical to the cybernetic planning model.
+
+\begin{definition}[Augmented Technology]
+The economy consists of $n$ production sectors indexed by $j = 1,\ldots,n$, characterized by:
+\begin{itemize}
+    \item $A \in \R^{n \times n}_+$: intermediate input coefficient matrix, where $A_{ij}$ is the quantity of good $i$ required per unit of output in sector $j$
+    \item $B \in \R^{n \times n}_+$: capital coefficient matrix, where $B_{ij}$ is the stock of capital good $i$ required per unit of output in sector $j$
+    \item $\vec{l} \in \R^n_+$: labor coefficient vector, where $l_j$ is labor required per unit of output in sector $j$
+    \item $\delta \in (0,1)$: depreciation rate
+\end{itemize}
+The augmented technical coefficient matrix is defined as:
+$$\bar{A} = A + \delta B$$
+\end{definition}
+
+\subsection{Material Balance}
+
+At each period $t$, gross output satisfies:
+\begin{equation}
+    \vec{X}_t = A\vec{X}_t + \vec{C}_t + \vec{I}_t + \vec{G}_t
+\end{equation}
+where:
+\begin{itemize}
+    \item $\vec{X}_t \in \R^n_+$: gross output vector
+    \item $\vec{C}_t \in \R^n_+$: aggregate household consumption vector
+    \item $\vec{I}_t \in \R^n_+$: gross investment vector
+    \item $\vec{G}_t \in \R^n_+$: government expenditure vector (exogenous)
+\end{itemize}
+
+Rearranging:
+\begin{equation}
+    (I - A)\vec{X}_t = \vec{C}_t + \vec{I}_t + \vec{G}_t
+\end{equation}
+
+\subsection{Capital Accumulation}
+
+The capital stock evolves according to:
+\begin{equation}
+    \vec{K}_{t+1} = (1-\delta)\vec{K}_t + \vec{I}_t
+\end{equation}
+where $\vec{K}_t \in \R^n_+$ is the sectoral capital stock vector.
+
+\subsection{Capital Requirement Constraint}
+
+Production requires capital:
+\begin{equation}
+    \vec{K}_t \geq B\vec{X}_t
+\end{equation}
+
+This constraint may or may not bind in the market equilibrium, depending on investment behavior and expectations.
+
+\begin{assumption}[Productivity]
+The augmented system is productive: $\rho(\bar{A}) < 1$, ensuring that the Leontief inverse $(I - \bar{A})^{-1}$ exists and has non-negative entries.
+\end{assumption}
+
+\section{Household Sector}
+
+\subsection{Household Heterogeneity}
+
+\begin{definition}[Household Population]
+There are $n_h$ heterogeneous households indexed by $h = 1,\ldots,n_h$. Each household is characterized by:
+\begin{itemize}
+    \item Preference weights $\vec{\alpha}_h = (\alpha_{1,h}, \ldots, \alpha_{n,h})$ with $\alpha_{i,h} > 0$ and $\sum_{i=1}^n \alpha_{i,h} = 1$
+    \item Labor endowment $\bar{L}_h \geq 0$
+    \item Capital ownership $\vec{K}_{h,t} \in \R^n_+$
+    \item Firm ownership shares $\vec{\theta}_h = (\theta_{h,1}, \ldots, \theta_{h,n})$ with $\theta_{h,j} \geq 0$ and $\sum_{h=1}^{n_h} \theta_{h,j} = 1$ for all $j$
+\end{itemize}
+\end{definition}
+
+\subsection{Household Preferences}
+
+Each household $h$ has CRRA preferences with good-specific curvature parameters:
+
+\begin{equation}
+    U_h(\vec{C}_h) = \sum_{i=1}^{n} \alpha_{i,h} \frac{C_{h,i}^{1-\sigma_i}}{1-\sigma_i}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $C_{h,i}$: consumption of good $i$ by household $h$
+    \item $\sigma_i > 0$: good-specific relative risk aversion parameter (common across households)
+    \item $\alpha_{i,h} > 0$: time-varying preference weight (normalized to sum to unity)
+\end{itemize}
+
+\begin{remark}
+The good-specific curvature $\sigma_i$ allows different goods to have different elasticities of substitution, matching the cybernetic planner's demand structure exactly.
+\end{remark}
+
+\subsection{Household Optimization Problem}
+
+Household $h$ solves:
+\begin{equation}
+\begin{aligned}
+    \max_{\vec{C}_h \geq \vec{0}} \quad & U_h(\vec{C}_h) = \sum_{i=1}^{n} \alpha_{i,h} \frac{C_{h,i}^{1-\sigma_i}}{1-\sigma_i} \\
+    \text{s.t.} \quad & \vec{P}_t^\top \vec{C}_h \leq Y_{h,t}
+\end{aligned}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $\vec{P}_t \in \R^n_{++}$: market price vector
+    \item $Y_{h,t}$: household $h$'s total income
+\end{itemize}
+
+\subsection{First-Order Conditions}
+
+The Lagrangian is:
+$$\mathcal{L}_h = \sum_{i=1}^{n} \alpha_{i,h} \frac{C_{h,i}^{1-\sigma_i}}{1-\sigma_i} + \mu_{h,t}\left(Y_{h,t} - \vec{P}_t^\top \vec{C}_h\right)$$
+
+First-order condition for good $i$:
+\begin{equation}
+    \alpha_{i,h} C_{h,i}^{-\sigma_i} = \mu_{h,t} P_{i,t}
+\end{equation}
+
+where $\mu_{h,t}$ is household $h$'s marginal utility of income.
+
+\subsection{Marshallian Demand}
+
+Solving the FOC for $C_{h,i}$:
+\begin{equation}
+    C_{h,i,t} = \left(\frac{\alpha_{i,h}}{\mu_{h,t} P_{i,t}}\right)^{1/\sigma_i}
+\end{equation}
+
+The marginal utility of income $\mu_{h,t}$ is determined by the budget constraint:
+\begin{equation}
+    Y_{h,t} = \sum_{i=1}^n P_{i,t} \left(\frac{\alpha_{i,h}}{\mu_{h,t} P_{i,t}}\right)^{1/\sigma_i}
+\end{equation}
+
+\subsection{Aggregate Demand}
+
+\begin{definition}[Aggregate Consumption]
+Aggregate consumption of good $i$ is:
+\begin{equation}
+    C_{i,t} = \sum_{h=1}^{n_h} C_{h,i,t} = \sum_{h=1}^{n_h} \left(\frac{\alpha_{i,h}}{\mu_{h,t} P_{i,t}}\right)^{1/\sigma_i}
+\end{equation}
+\end{definition}
+
+\begin{remark}
+Unlike the planner's model, which uses a CES aggregation of household preferences, the market model directly sums individual demands. The two coincide only under specific conditions (identical preferences or complete markets with transferable utility).
+\end{remark}
+
+\section{Firm Sector}
+
+\subsection{Technology}
+
+Firms in sector $j$ use Leontief (fixed coefficients) technology:
+
+\begin{equation}
+    X_{j,t} = \min\left\{ \frac{Z_{i,j,t}}{A_{ij}} : i=1,\ldots,n, \quad \frac{K_{j,t}}{B_{jj}}, \quad \frac{L_{j,t}}{l_j} \right\}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $Z_{i,j,t}$: quantity of intermediate input $i$ used by sector $j$
+    \item $K_{j,t}$: capital employed in sector $j$
+    \item $L_{j,t}$: labor employed in sector $j$
+\end{itemize}
+
+\subsection{Cost Structure}
+
+For gross output $X_{j,t}$, the firm's total cost is:
+
+\begin{equation}
+    TC_j(X_{j,t}) = \left(\sum_{i=1}^n P_{i,t} A_{ij} + r_{j,t} B_{jj} + w_t l_j\right) X_{j,t}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $r_{j,t}$: rental rate of capital in sector $j$
+    \item $w_t$: wage rate (economy-wide)
+\end{itemize}
+
+\textbf{Marginal Cost (Unit Cost):}
+\begin{equation}
+    MC_{j,t} = \sum_{i=1}^n P_{i,t} A_{ij} + r_{j,t} B_{jj} + w_t l_j
+\end{equation}
+
+\subsection{Perfect Competition}
+
+Firms are price-takers and earn zero economic profit in equilibrium:
+
+\begin{equation}
+    P_{j,t} = MC_{j,t}
+\end{equation}
+
+\textbf{Zero-Profit Condition (for all $j$):}
+\begin{equation}
+    P_{j,t} = \sum_{i=1}^n P_{i,t} A_{ij} + r_{j,t} B_{jj} + w_t l_j
+\end{equation}
+
+\subsection{Matrix Form of Pricing}
+
+In vector notation:
+\begin{equation}
+    \vec{P}_t = A^\top \vec{P}_t + B^\top \vec{r}_t + w_t \vec{l}
+\end{equation}
+
+Rearranging:
+\begin{equation}
+    (I - A^\top)\vec{P}_t = B^\top \vec{r}_t + w_t \vec{l}
+\end{equation}
+
+This is the dual to the material balance equation.
+
+\section{Investment Behavior}
+
+\subsection{Firm Investment Decision}
+
+Unlike the planner, who determines investment to satisfy future consumption growth, firms in the market economy make decentralized investment decisions based on expectations.
+
+Firm $j$ chooses investment to satisfy expected future capital requirements:
+\begin{equation}
+    K_{j,t+1} = B_{jj} \E_t[X_{j,t+1}]
+\end{equation}
+
+where $\E_t[X_{j,t+1}]$ is the firm's expectation of next period's output.
+
+\textbf{Implied Investment:}
+\begin{equation}
+    I_{j,t} = K_{j,t+1} - (1-\delta)K_{j,t} = B_{jj}\E_t[X_{j,t+1}] - (1-\delta)K_{j,t}
+\end{equation}
+
+\subsection{Expectation Formation}
+
+\subsubsection{Adaptive Expectations}
+
+Firms update expectations based on recent demand signals:
+\begin{equation}
+    \E_t[X_{j,t+1}] = X_{j,t} + \phi_j \left(C_{j,t}^d - C_{j,t}\right)
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $C_{j,t}^d$: observed final demand for good $j$ (consumption + investment + government)
+    \item $\phi_j > 0$: sector-specific adjustment speed parameter
+\end{itemize}
+
+\subsubsection{Revealed Demand Growth Signal}
+
+Following the planner's revealed demand mechanism:
+\begin{equation}
+    \E_t[X_{j,t+1}] = X_{j,t}(1 + \hat{G}_{j,t})
+\end{equation}
+
+where the growth rate $\hat{G}_{j,t}$ is inferred from elasticity-corrected excess demand:
+\begin{equation}
+    \hat{G}_{j,t} = \frac{\hat{C}_{j,t-1} - C_{j,t-1}}{C_{j,t-1}}
+\end{equation}
+
+and the revealed demand estimate is:
+\begin{equation}
+    \hat{C}_{j,t-1} = \sum_{\tau=1}^{3} \frac{C_{j,t-1,\tau}^m}{1 - s_{\tau,j,t-1}}
+\end{equation}
+
+with the elasticity correction signal:
+\begin{equation}
+    s_{\tau,j,t} = -\text{clamp}\left(0, \frac{1}{\rho(M) + 1}, \epsilon_j \frac{\Delta P_{\tau,j,t}}{P_{j,t}}\right)
+\end{equation}
+
+where $\epsilon_j = -1/\sigma_j$ is the price elasticity and $M = B(I - \bar{A})^{-1}$ is the dynamic multiplier matrix.
+
+\begin{remark}
+This specification allows the market model to use the same demand inference logic as the planner, isolating the coordination mechanism as the key difference.
+\end{remark}
+
+\section{Factor Markets}
+
+\subsection{Labor Market}
+
+\subsubsection{Labor Supply}
+
+Aggregate labor supply is the sum of household endowments:
+\begin{equation}
+    L^s = \sum_{h=1}^{n_h} \bar{L}_h
+\end{equation}
+
+We assume labor supply is inelastic (households supply their full endowment).
+
+\subsubsection{Labor Demand}
+
+Aggregate labor demand from all sectors:
+\begin{equation}
+    L^d_t = \vec{l}^\top \vec{X}_t = \sum_{j=1}^n l_j X_{j,t}
+\end{equation}
+
+\subsubsection{Market Clearing}
+
+The labor market clears when:
+\begin{equation}
+    \vec{l}^\top \vec{X}_t = L^s
+\end{equation}
+
+The equilibrium wage $w_t$ adjusts to ensure this condition holds.
+
+\subsection{Capital Markets}
+
+\subsubsection{Capital Supply}
+
+Aggregate capital supply by good $i$:
+\begin{equation}
+    K_{i,t}^s = \sum_{h=1}^{n_h} K_{h,i,t}
+\end{equation}
+
+\subsubsection{Capital Demand}
+
+Firm demand for capital good $i$:
+\begin{equation}
+    K_{i,t}^d = \sum_{j=1}^n B_{ij} X_{j,t}
+\end{equation}
+
+\subsubsection{Market Clearing}
+
+Capital market clears for each good $i$:
+\begin{equation}
+    \sum_{h=1}^{n_h} K_{h,i,t} \geq \sum_{j=1}^n B_{ij} X_{j,t}
+\end{equation}
+
+The rental rate $r_{i,t}$ adjusts to clear the market. If the inequality is strict, $r_{i,t} = 0$.
+
+\textbf{Complementary Slackness:}
+\begin{equation}
+    r_{i,t} \left(\sum_{h=1}^{n_h} K_{h,i,t} - \sum_{j=1}^n B_{ij} X_{j,t}\right) = 0
+\end{equation}
+
+\section{Income Distribution}
+
+\subsection{Household Income}
+
+Household $h$ receives income from three sources:
+
+\begin{equation}
+    Y_{h,t} = w_t \bar{L}_h + \sum_{j=1}^n r_{j,t} K_{h,j,t} + \sum_{j=1}^n \theta_{h,j} \Pi_{j,t}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $w_t \bar{L}_h$: labor income
+    \item $\sum_{j=1}^n r_{j,t} K_{h,j,t}$: capital rental income
+    \item $\sum_{j=1}^n \theta_{h,j} \Pi_{j,t}$: profit share from firm ownership
+\end{itemize}
+
+\begin{remark}
+Under perfect competition with constant returns to scale, $\Pi_{j,t} = 0$ for all $j$, so household income simplifies to:
+\begin{equation}
+    Y_{h,t} = w_t \bar{L}_h + \sum_{j=1}^n r_{j,t} K_{h,j,t}
+\end{equation}
+\end{remark}
+
+\subsection{Factor Income Identity}
+
+Total household income equals total factor payments:
+\begin{equation}
+    \sum_{h=1}^{n_h} Y_{h,t} = w_t L^s + \sum_{i=1}^n r_{i,t} K_{i,t}
+\end{equation}
+
+This ensures that GDP from the income side equals GDP from the production side.
+
+\section{Market Equilibrium}
+
+\begin{definition}[Competitive Equilibrium]
+A competitive equilibrium for periods $t = 0, 1, \ldots, T$ is a collection of:
+\begin{itemize}
+    \item Prices: $\{\vec{P}_t, w_t, \vec{r}_t\}_{t=0}^T$
+    \item Household allocations: $\{\vec{C}_{h,t}\}_{h=1,\ldots,n_h}^{t=0,\ldots,T}$
+    \item Firm allocations: $\{\vec{X}_t, \vec{I}_t\}_{t=0}^T$
+    \item Capital stocks: $\{\vec{K}_t\}_{t=0}^T$
+\end{itemize}
+such that the following conditions hold:
+\end{definition}
+
+\subsection{Optimality Conditions}
+
+\textbf{1. Household Optimization:} For each $h = 1,\ldots,n_h$ and $t = 0,\ldots,T$:
+\begin{equation}
+    \vec{C}_{h,t} \in \arg\max_{\vec{C}_h \geq 0} U_h(\vec{C}_h) \quad \text{s.t.} \quad \vec{P}_t^\top \vec{C}_h \leq Y_{h,t}
+\end{equation}
+
+\textbf{2. Firm Zero-Profit:} For each $j = 1,\ldots,n$ and $t = 0,\ldots,T$:
+\begin{equation}
+    P_{j,t} = \sum_{i=1}^n P_{i,t} A_{ij} + r_{j,t} B_{jj} + w_t l_j
+\end{equation}
+
+\subsection{Market Clearing Conditions}
+
+\textbf{3. Goods Market:} For each $i = 1,\ldots,n$ and $t = 0,\ldots,T$:
+\begin{equation}
+    X_{i,t} = \sum_{j=1}^n A_{ij} X_{j,t} + \sum_{h=1}^{n_h} C_{h,i,t} + I_{i,t} + G_{i,t}
+\end{equation}
+
+\textbf{4. Labor Market:} For $t = 0,\ldots,T$:
+\begin{equation}
+    \sum_{j=1}^n l_j X_{j,t} = \sum_{h=1}^{n_h} \bar{L}_h
+\end{equation}
+
+\textbf{5. Capital Market:} For each $i = 1,\ldots,n$ and $t = 0,\ldots,T$:
+\begin{equation}
+    \sum_{j=1}^n B_{ij} X_{j,t} \leq \sum_{h=1}^{n_h} K_{h,i,t}
+\end{equation}
+with complementary slackness: $r_{i,t} \geq 0$ and $r_{i,t} = 0$ if the inequality is strict.
+
+\subsection{Accounting Identities}
+
+\textbf{6. Investment-Saving Identity:} For $t = 0,\ldots,T$:
+\begin{equation}
+    \sum_{i=1}^n P_{i,t} I_{i,t} = \sum_{h=1}^{n_h} S_{h,t}
+\end{equation}
+where household $h$'s saving is:
+\begin{equation}
+    S_{h,t} = Y_{h,t} - \vec{P}_t^\top \vec{C}_{h,t}
+\end{equation}
+
+\textbf{7. GDP Identity:}
+\begin{equation}
+    \text{GDP}_t = \vec{v}_t^\top \vec{X}_t = w_t L^s + \sum_{i=1}^n r_{i,t} K_{i,t}
+\end{equation}
+where $\vec{v}_t = (I - A^\top)\vec{P}_t$ is the value-added coefficient vector.
+
+\section{Dynamic Evolution}
+
+\subsection{State Variables}
+
+The state of the economy at time $t$ is characterized by:
+\begin{itemize}
+    \item Aggregate capital stocks: $\vec{K}_t \in \R^n_+$
+    \item Capital distribution: $\{K_{h,i,t}\}_{h,i}$
+    \item Preference weights: $\{\alpha_{i,h,t}\}_{h,i}$
+\end{itemize}
+
+\subsection{Capital Accumulation}
+
+For each sector $i$:
+\begin{equation}
+    K_{i,t+1} = (1-\delta)K_{i,t} + I_{i,t}
+\end{equation}
+
+Household capital evolves proportionally (absent explicit trading):
+\begin{equation}
+    K_{h,i,t+1} = \frac{K_{h,i,t}}{\sum_{h'} K_{h',i,t}} K_{i,t+1}
+\end{equation}
+
+\subsection{Preference Updating}
+
+Following the planner's adaptive mechanism, household preferences evolve based on observed expenditure patterns:
+
+\begin{equation}
+    \alpha_{i,h,t+1} = \frac{1}{3} \sum_{\tau=1}^3 \frac{P_{i,t,\tau} (C_{h,i,t,\tau}^m)^{\sigma_i}}{\sum_{j=1}^n P_{j,t,\tau} (C_{h,j,t,\tau}^m)^{\sigma_j}}
+\end{equation}
+
+where $C_{h,i,t,\tau}^m$ is measured consumption of good $i$ by household $h$ in sub-period $\tau$ of quarter $t$.
+
+This ensures:
+\begin{equation}
+    \sum_{i=1}^n \alpha_{i,h,t+1} = 1 \quad \text{and} \quad \alpha_{i,h,t+1} > 0 \quad \forall i,h
+\end{equation}
+
+\begin{remark}
+This updating rule mirrors the planner's preference discovery mechanism, allowing direct comparison of how each system adapts to evolving demand patterns.
+\end{remark}
+
+\subsection{Price Adjustment (Tâtonnement)}
+
+Within each quarterly period, prices adjust toward market clearing through a Walrasian tâtonnement process:
+
+\begin{equation}
+    P_{i,t}^{(k+1)} = P_{i,t}^{(k)} \left(1 - \frac{1}{\epsilon_i} \cdot \frac{Z_{i,t}^{(k)}}{C_{i,t}}\right)
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $Z_{i,t}^{(k)} = C_{i,t}^d(\vec{P}_t^{(k)}) - C_{i,t}^s(\vec{P}_t^{(k)})$: excess demand at iteration $k$
+    \item $\epsilon_i = -1/\sigma_i$: price elasticity of demand
+    \item $C_{i,t}^d$: total demand (consumption + intermediate + investment + government)
+    \item $C_{i,t}^s$: net supply
+\end{itemize}
+
+This Newton-step adjustment uses the CRRA demand curvature to calibrate the step size.
+
+\section{Existence and Welfare Properties}
+
+\begin{theorem}[Existence of Equilibrium]
+Under the following conditions:
+\begin{enumerate}[label=(\roman*)]
+    \item $\rho(\bar{A}) < 1$ (productive technology)
+    \item $\vec{K}_0 \gg B\vec{X}_0$ (sufficient initial capital)
+    \item $\alpha_{i,h} > 0$ for all $i,h$ (strictly positive preferences)
+    \item $\bar{L}_h > 0$ for all $h$ (positive labor endowments)
+\end{enumerate}
+there exists a competitive equilibrium $\{\vec{P}_t, w_t, \vec{r}_t, \vec{C}_{h,t}, \vec{X}_t, \vec{I}_t\}_{t=0}^T$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The existence follows from standard fixed-point arguments for Arrow-Debreu economies. The Leontief structure ensures that the production possibility set is convex. Household preferences are strictly convex. The feasibility conditions ensure non-emptiness of the constraint set. By Kakutani's fixed-point theorem applied to the excess demand correspondence, a competitive equilibrium exists.
+\end{proof}
+
+\begin{theorem}[First Welfare Theorem]
+If households have identical homothetic preferences ($\alpha_{i,h} = \alpha_i$ for all $h$) and capital markets are complete, the competitive equilibrium allocation is Pareto efficient.
+\end{theorem}
+
+\begin{proposition}[Inefficiency with Heterogeneity]
+With heterogeneous preferences ($\alpha_{i,h} \neq \alpha_{i,h'}$ for some $h \neq h'$) and incomplete capital markets, the decentralized equilibrium generally differs from the planner's solution. The welfare loss arises from:
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Distributional distortions}: Unequal capital ownership creates consumption inequality that does not reflect true preference heterogeneity
+    \item \textbf{Coordination failures}: Decentralized investment decisions lack knowledge of aggregate capacity constraints
+    \item \textbf{Aggregation failures}: Market prices reflect marginal valuations weighted by income, not the planner's Pareto-weighted social marginal utilities
+\end{enumerate}
+\end{proposition}
+
+\section{Comparison Framework}
+
+The market CGE model can be directly compared to the cybernetic planner on multiple dimensions.
+
+\subsection{Welfare Measurement}
+
+\textbf{Aggregate Welfare:}
+\begin{equation}
+    W_t^{\text{CGE}} = \sum_{h=1}^{n_h} \omega_h U_h(\vec{C}_{h,t})
+\end{equation}
+
+where $\omega_h > 0$ are Pareto weights satisfying $\sum_h \omega_h = 1$.
+
+For direct comparison to the planner, we use:
+\begin{equation}
+    \omega_h = \frac{Y_{h,0}}{\sum_{h'} Y_{h',0}}
+\end{equation}
+(initial income shares).
+
+\textbf{Cumulative Discounted Welfare:}
+\begin{equation}
+    W^{\text{CGE}} = \sum_{t=0}^T \beta^t W_t^{\text{CGE}}
+\end{equation}
+
+where $\beta \in (0,1)$ is the discount factor.
+
+\subsection{Output and Growth}
+
+\textbf{Real GDP:}
+\begin{equation}
+    \text{GDP}_t = \vec{v}_t^\top \vec{X}_t
+\end{equation}
+
+where $\vec{v}_t = (I - A^\top)\vec{P}_t$ is the value-added vector.
+
+\textbf{Real GDP Growth Rate:}
+\begin{equation}
+    g_t^{\text{GDP}} = \frac{\text{GDP}_t - \text{GDP}_{t-1}}{\text{GDP}_{t-1}}
+\end{equation}
+
+\textbf{Sectoral Growth Rates:}
+\begin{equation}
+    g_{j,t} = \frac{X_{j,t} - X_{j,t-1}}{X_{j,t-1}}
+\end{equation}
+
+\subsection{Allocative Efficiency}
+
+\textbf{Euclidean Distance:}
+\begin{equation}
+    \Delta_t^{\text{alloc}} = \|\vec{X}_t^{\text{CGE}} - \vec{X}_t^{\text{Planner}}\|_2
+\end{equation}
+
+\textbf{Sectoral Misallocation:}
+\begin{equation}
+    \delta_{j,t} = \frac{|X_{j,t}^{\text{CGE}} - X_{j,t}^{\text{Planner}}|}{X_{j,t}^{\text{Planner}}}
+\end{equation}
+\subsection{Price Stability}
+
+\textbf{Inflation Rate:}
+\begin{equation}
+    \pi_t = \frac{\sum_{i=1}^n P_{i,t} C_{i,t-1}}{\sum_{i=1}^n P_{i,t-1} C_{i,t-1}} - 1
+\end{equation}
+
+\textbf{Price Volatility:}
+\begin{equation}
+    \sigma_t^P = \text{Std}\left(\frac{P_{i,t} - P_{i,t-1}}{P_{i,t-1}}\right)_{i=1,\ldots,n}
+\end{equation}
+
+\subsection{Key Comparison Metrics}
+
+\begin{enumerate}
+    \item \textbf{Welfare Advantage:}
+    \begin{equation}
+        \Delta W = \frac{W^{\text{Planner}} - W^{\text{CGE}}}{W^{\text{CGE}}} \times 100\%
+    \end{equation}
+    
+    \item \textbf{Growth Differential:}
+    \begin{equation}
+        \Delta g = g_T^{\text{CGE}} - g_T^{\text{Planner}}
+    \end{equation}
+    
+    \item \textbf{Allocative Inefficiency:}
+    \begin{equation}
+        \bar{\Delta}^{\text{alloc}} = \frac{1}{T} \sum_{t=0}^T \Delta_t^{\text{alloc}}
+    \end{equation}
+    
+    \item \textbf{Coordination Quality:}
+    \begin{equation}
+        \bar{\rho}^{\text{invest}} = \frac{1}{T} \sum_{t=0}^T \rho_t^{\text{invest}}
+    \end{equation}
+\end{enumerate}
+
+\section{Computational Implementation}
+
+\subsection{Algorithm Structure}
+
+The market CGE model is solved iteratively:
+
+\begin{enumerate}
+    \item \textbf{Initialize}: Set $t = 0$, $\vec{K}_0$, $\{\alpha_{i,h,0}\}_h$, $\vec{P}_0$
+    \item \textbf{Within each quarter $t$}:
+    \begin{enumerate}[label=(\alph*)]
+        \item Solve for equilibrium prices $\{\vec{P}_t, w_t, \vec{r}_t\}$ via tâtonnement
+        \item Compute household demands $\vec{C}_{h,t}$ from Marshallian demand
+        \item Determine firm production $\vec{X}_t$ from market clearing
+        \item Calculate investment $\vec{I}_t$ from firm expectations
+        \item Record realized consumption for preference updating
+    \end{enumerate}
+    \item \textbf{Update state variables}:
+    \begin{enumerate}[label=(\alph*)]
+        \item Capital: $\vec{K}_{t+1} = (1-\delta)\vec{K}_t + \vec{I}_t$
+        \item Preferences: $\alpha_{i,h,t+1}$ via expenditure share updating
+    \end{enumerate}
+    \item \textbf{Advance}: Set $t \leftarrow t+1$, return to step 2
+\end{enumerate}
+
+\subsection{Tâtonnement Sub-Algorithm}
+
+Within each quarter, iterate:
+
+\begin{enumerate}
+    \item Initialize prices $\vec{P}_t^{(0)}$
+    \item For $k = 0, 1, 2, \ldots$ until convergence:
+    \begin{enumerate}[label=(\alph*)]
+        \item Compute household demands: $C_{h,i,t}^{(k)} = \left(\frac{\alpha_{i,h}}{\mu_{h,t}^{(k)} P_{i,t}^{(k)}}\right)^{1/\sigma_i}$
+        \item Calculate aggregate demand: $C_{i,t}^{d,(k)} = \sum_h C_{h,i,t}^{(k)} + \text{intermediate} + \text{investment} + G_{i,t}$
+        \item Compute supply: $C_{i,t}^{s,(k)}$ from material balance
+        \item Update prices: $P_{i,t}^{(k+1)} = P_{i,t}^{(k)} \left(1 - \frac{1}{\epsilon_i} \cdot \frac{Z_{i,t}^{(k)}}{C_{i,t}}\right)$
+        \item Check convergence: $\|\vec{Z}_t^{(k)}\|_\infty < \text{tol}$
+    \end{enumerate}
+\end{enumerate}
+
+\subsection{Convergence Criteria}
+
+The tâtonnement terminates when:
+\begin{equation}
+    \max_{i=1,\ldots,n} \left|\frac{C_{i,t}^{d,(k)} - C_{i,t}^{s,(k)}}{C_{i,t}^{s,(k)}}\right| < \varepsilon
+\end{equation}
+
+where $\varepsilon = 10^{-4}$ is the tolerance level.
+
+\section{Calibration}
+
+\subsection{Technology Parameters}
+
+The matrices $A$ and $B$ are calibrated from input-output tables (e.g., Spanish National Accounts 2022):
+\begin{itemize}
+    \item $A$: Use-table coefficients
+    \item $B$: Capital flow matrix divided by output
+    \item $\vec{l}$: Labor compensation divided by output
+    \item $\delta$: Standard depreciation rate (e.g., 0.01 per quarter)
+\end{itemize}
+
+\subsection{Household Parameters}
+
+\begin{itemize}
+    \item $n_h$: Number of households (e.g., 1000 for heterogeneity)
+    \item $\alpha_{i,h,0}$: Draw from Dirichlet distribution centered on benchmark expenditure shares
+    \item $\sigma_i$: Estimate from demand elasticities or set uniformly (e.g., $\sigma_i = 1$ for Cobb-Douglas)
+    \item $\bar{L}_h$: Proportional to total labor supply
+    \item $K_{h,i,0}$: Draw from wealth distribution matching empirical Gini coefficient
+\end{itemize}
+
+\subsection{Initial Conditions}
+
+\begin{itemize}
+    \item $\vec{K}_0$: Capital stock from national accounts
+    \item $\vec{P}_0$: Normalize to unity or use observed prices
+    \item $w_0$: Set so labor market clears initially
+    \item $\vec{r}_0$: Solve from zero-profit conditions
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Comparison to Cybernetic Planning}
+
+The key differences between this market model and the cybernetic planner are:
+
+\begin{enumerate}
+    \item \textbf{Coordination mechanism}:
+    \begin{itemize}
+        \item Planner: Shadow prices from constrained optimization
+        \item Market: Market prices from supply-demand equilibrium
+    \end{itemize}
+    
+    \item \textbf{Investment determination}:
+    \begin{itemize}
+        \item Planner: Feedback rule derived from Neumann expansion, accounts for full system dynamics
+        \item Market: Decentralized firm expectations, potentially myopic
+    \end{itemize}
+    
+    \item \textbf{Resource constraints}:
+    \begin{itemize}
+        \item Planner: Hard constraints enforced ex ante
+        \item Market: Constraints satisfied through price adjustment, may overshoot
+    \end{itemize}
+    
+    \item \textbf{Preference aggregation}:
+    \begin{itemize}
+        \item Planner: Pareto-weighted social welfare with explicit weights
+        \item Market: Implicit aggregation through income distribution
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Expected Performance Differences}
+
+Based on the structure of the models, we expect:
+
+\begin{itemize}
+    \item \textbf{Higher raw GDP growth in market model}: Uncoordinated investment can create reflexive demand multipliers
+    \item \textbf{Higher welfare in planner}: Better alignment with preference-weighted utility
+    \item \textbf{More volatility in market model}: Expectation errors propagate through investment
+    \item \textbf{Potential overproduction in markets}: Firms lack global capacity information
+\end{itemize}
+
+\subsection{Extensions}
+
+This framework can be extended to incorporate:
+\begin{itemize}
+    \item Monetary policy and nominal rigidities (DSGE features)
+    \item Incomplete markets and borrowing constraints (HANK features)
+    \item Stochastic shocks to productivity, preferences, or policy
+    \item Trade and international linkages
+    \item Environmental constraints and sustainability metrics
+\end{itemize}
+
+\section{Conclusion}
+
+This document provides a complete mathematical specification of a decentralized market CGE model that is directly comparable to the cybernetic planning framework. The model maintains identical technological structure and household preferences while replacing centralized optimization with competitive markets and decentralized decision-making.
+
+The specification enables rigorous empirical comparison of:
+\begin{itemize}
+    \item Allocative efficiency (welfare outcomes)
+    \item Dynamic performance (growth, stability)
+    \item Coordination quality (alignment between production and preferences)
+    \item Distributional outcomes (inequality, access)
+\end{itemize}
+
+By isolating the coordination mechanism as the key variable while holding all other structure constant, this comparison can provide definitive evidence on the relative performance of planning versus market systems in modern computational settings.
+
+\end{document}
