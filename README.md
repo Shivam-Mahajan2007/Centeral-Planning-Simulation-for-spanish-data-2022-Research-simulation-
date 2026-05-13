@@ -8,54 +8,69 @@
 
 The simulation models a cybernetic planning system where resources are allocated based on revealed demand signals.
 
+<<<<<<< HEAD
 - **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99% and achieving a 7-10x speedup.
+=======
+- **FISTA Dual Ascent Solver**: A Nesterov-accelerated dual-ascent solver operating in log-space with backtracking line search and adaptive momentum restarts. Cold-started Lagrange multipliers ensure robustness to structural shifts between quarters. Converges in ~120 iterations (~380 MVPs) on the 65-sector benchmark.
+- **Multithreaded Market Clearing**: The monthly tâtonnement and household demand aggregation are parallelized via `Threads.@threads` in Julia for high-throughput execution across 1,000+ heterogeneous households.
+- **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99%.
+>>>>>>> 8d7391d (major update: reorganization & comparative system)
 - **Decentralized Production (250 Firms)**: Sectoral capital is distributed across 250 independent firms. Each firm solves a local Linear Program natively via the **HiGHS Dual Simplex** solver.
-- **Micro-Aggregated Demand Side**: 1,000 heterogeneous households with Linear Expenditure System (LES) utility functions.
-- **Professional Diagnostic Ensemble**: The Monte Carlo engine supports 250+ stochastic runs with real-time intermediate plotting and a 100% success rate.
+- **Micro-Aggregated Demand Side**: 1,000 heterogeneous households with CRRA utility functions and stochastic preference evolution.
+- **Oracle Welfare Benchmark**: A welfare comparison suite (`comparison.py`) evaluates the learning planner against a first-best Oracle with perfect preference information. Monte Carlo results confirm a welfare loss of ~0.1%.
+- **Professional Diagnostic Ensemble**: The Monte Carlo engine supports 250+ stochastic runs with real-time intermediate plotting.
 
 ---
 
-## 2. Directory Structure and Components
+## 2. Directory Structure
 
-### [Scripts/](./Scripts) — Kernels and Orchestration
-- **`model_core.jl`**: Native Julia implementation of the **Stable PBB** dual ascent solver, HiGHS-based decentralized LPs, and Walrasian tâtonnement.
-- **`julia_bridge.py`**: FFI layer using `juliacall` for low-latency data exchange.
-- **`simulation.py`**: Orchestrates the quarterly loop and physical accounting identities.
-- **`monte_carlo.py`**: High-performance ensemble engine with real-time fan chart generation.
-- **`api.py`**: FastAPI server for dashboard telemetry.
+```
+Scripts/
+├── main.py                 # Primary simulation entry point
+├── comparison.py           # Monte Carlo welfare comparison (Learning vs Oracle)
+├── core/
+│   ├── model_core.jl       # Julia kernels: FISTA solver, tâtonnement, firm LPs
+│   ├── julia_bridge.py     # Python-Julia FFI layer (juliacall)
+│   └── scaling.jl          # Empirical complexity scaling study
+├── data/
+│   ├── data_loader.py      # IO data loading and preprocessing
+│   └── calibration.py      # Model state initialization and calibration
+├── engine/
+│   ├── simulation.py       # Quarterly loop orchestration
+│   ├── monte_carlo.py      # Ensemble engine with fan chart generation
+│   └── scenarios.py        # Sensitivity analysis framework
+└── analysis/
+    └── plots.py            # Diagnostic plotting routines
 
-### [App/](./App) — Interactive Research Dashboard
-- **Real-Time Telemetry**: Uses Server-Sent Events (SSE) to stream simulation results from Python.
-- **Dynamic Charting**: Responsive grid of charts visualizing GDP, Inflation, and Shadow Prices.
-- **Parameter Control**: Interface to modify `config.json` parameters before launching runs.
-
-### [Data/](./Data) — Benchmark Datasets
-- **`Spanish_A-matrix.xlsx`**: Technical coefficients (A) for 65 sectors.
-- **`Value_added.xlsx` / `Consumption_and_total_production.xlsx`**: Benchmark totals for 2022 Spanish National Accounts.
-- **`config.json`**: Central runtime configuration (tolerances, shock sigmas, etc.).
+Data/                       # 2022 Spanish National Accounts IO tables
+Results/                    # Auto-generated output directories
+  ├── MonteCarlo/           # Growth and stability ensemble results
+  └── Comparison/           # Welfare comparison fan charts
+```
 
 ---
 
 ## 3. Getting Started
 
 ### Prerequisites
-- **Python 3.10+**, **Julia 1.10+**, **Node.js 18+** (for Dashboard)
-- **Pip Dependencies**: `numpy`, `matplotlib`, `juliacall`, `openpyxl`, `fastapi`, `uvicorn`
+- **Python 3.10+**, **Julia 1.10+**
+- **Pip Dependencies**: `numpy`, `matplotlib`, `juliacall`, `openpyxl`, `scipy`
 
 ```bash
-# Install dependencies
-pip install numpy matplotlib juliacall openpyxl fastapi uvicorn sse-starlette
+pip install numpy matplotlib juliacall openpyxl scipy
 ```
 
-### Running the Ensemble (CLI)
+### Running the Simulation
 ```bash
-python3 Scripts/monte_carlo.py
-```
+# Standard simulation (uses Data/config.json)
+python3 Scripts/main.py
 
-### Running the Dashboard
-1. Start Backend: `uvicorn Scripts.api:app --reload`
-2. Start Frontend: `cd App && npm run dev`
-Open `http://localhost:5174` in your browser.
+# Monte Carlo growth ensemble (250 runs, 20 quarters)
+python3 Scripts/engine/monte_carlo.py
+
+# Welfare comparison: Learning vs Oracle (250 runs, 8 quarters)
+python3 Scripts/comparison.py --runs 250 --quarters 8
+```
 
 ---
 
@@ -63,11 +78,16 @@ Open `http://localhost:5174` in your browser.
 
 Key configurations in `Data/config.json`:
 - `n_runs` (250): Number of Monte Carlo realizations.
-- `primal_tol` (0.001): Planner math precision.
+- `n_quarters` (20): Simulation horizon.
+- `n_households` (1000): Number of heterogeneous households.
+- `n_firms` (250): Number of decentralized firms.
+- `primal_tol` (0.001): Planner KKT precision.
 - `pref_drift_sigma` (0.02): Volatility of stochastic preference shifts.
 
-The ensemble generates 6 high-fidelity diagnostic charts in `Results/MonteCarlo/`:
-- **GDP Level**, **Geomean Inflation**, **Capital Capacity Slack**, **Alpha Gap**, **Price Drift**, and **Solver Iterations (avg 121)**.
+### Diagnostic Outputs
+The ensemble generates high-fidelity diagnostic charts in `Results/`:
+- **GDP Level**, **Geomean Inflation**, **Capital Capacity Slack**, **Alpha Gap**, **Price Drift**, **Solver MVPs** (in `Results/MonteCarlo/`)
+- **Welfare Loss Fan Chart** (in `Results/Comparison/`)
 
 ---
 

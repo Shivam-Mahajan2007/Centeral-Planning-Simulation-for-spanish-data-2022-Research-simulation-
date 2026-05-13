@@ -19,7 +19,6 @@ from juliacall import Main as jl
 
 # -- Load models ---------------------------------------------------------------
 JULIA_CORE = Path(__file__).parent / "model_core.jl"
-JULIA_CGE_CORE = Path(__file__).parent / "CGE" / "leontief_market.jl"
 
 def _load_core():
     # Only include the file if the Module isn't already defined to avoid constant redefinition errors
@@ -32,29 +31,12 @@ def _load_core():
     jl.seval("using Random")
     return core
 
-def _load_cge_core():
-    jl.seval(f"""
-        if !isdefined(Main, :LeontiefMarket)
-            include("{str(JULIA_CGE_CORE)}")
-        end
-    """)
-    cge_core = jl.LeontiefMarket
-    return cge_core
-
 try:
     CORE = _load_core()
     logger.info("Julia Core Engine loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Julia Core Engine: {e}")
     raise
-
-try:
-    CGE_CORE = _load_cge_core()
-    logger.info("Julia Leontief CGE Core Engine loaded successfully.")
-except Exception as e:
-    logger.error(f"Failed to load Julia Leontief CGE Core Engine: {e}")
-    # Don't strictly raise, as it might just be missing in some test suites
-    pass
 
 # -- Helpers ------------------------------------------------------------------
 

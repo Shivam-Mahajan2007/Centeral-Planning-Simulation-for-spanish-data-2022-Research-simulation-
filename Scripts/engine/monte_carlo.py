@@ -150,8 +150,8 @@ def run_ensemble():
     config_params = {k: config_handler.get(k) for k in sig.parameters.keys() if k != 'data'}
 
     collector = TrajectoryCollector(n_runs, n_q)
-    out_dir = f"../Results/MonteCarlo/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
+    out_dir = Path(__file__).parents[2] / "Results" / "MonteCarlo" / datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_dir.mkdir(parents=True, exist_ok=True)    
     print(f"Starting Sequential Monte-Carlo: {n_runs} runs.")
     print(f"Parameters: { {k:v for k,v in config_params.items() if v is not None} }")
     print(f"Diagnostics: GDP, Inflation, Slack, Alpha Gap, Price Drift, Iterations.")

@@ -28,17 +28,14 @@ class WelfareTrajectoryCollector:
     def __init__(self, n_runs, n_q):
         self.n_runs = n_runs
         self.n_q = n_q
-        self.success_count = 0
         self.welfare_oracle = np.full((n_runs, n_q), np.nan)
         self.welfare_learn = np.full((n_runs, n_q), np.nan)
         self.welfare_loss = np.full((n_runs, n_q), np.nan)
 
-    def add_run(self, idx, oracle_traj, learn_traj):
-        self.success_count += 1
-        self.welfare_oracle[idx, :] = oracle_traj
-        self.welfare_learn[idx, :] = learn_traj
-        # Welfare loss %: (Oracle - Learning) / abs(Oracle) * 100
-        self.welfare_loss[idx, :] = (oracle_traj - learn_traj) / np.abs(oracle_traj) * 100.0
+    def compute_loss(self):
+        # Only compute where both exist
+        mask = (~np.isnan(self.welfare_oracle)) & (~np.isnan(self.welfare_learn))
+        self.welfare_loss[mask] = (self.welfare_oracle[mask] - self.welfare_learn[mask]) / np.abs(self.welfare_oracle[mask]) * 100.0
 
 class ProfessionalPlotter:
     def __init__(self, out_dir):
@@ -74,11 +71,11 @@ def calculate_welfare(state, alpha_true_h=None):
     P = state.P
     mu = state.mu_planner * 3.0
     
+    # C_hi* = (w_h * alpha_hi / (mu * P_i))^(1/sigma_i)
     C_h_star = (w_h[:, None] * a_h / (mu * P[None, :])) ** (1.0 / sig[None, :])
     
     welfare = 0.0
     for h in range(n_h):
-        # Contribution per household
         h_welfare = 0.0
         for i in range(state.n):
             c_val = max(C_h_star[h, i], 1e-10)
@@ -109,8 +106,8 @@ def run_ensemble(n_runs=20, n_quarters=8):
         "delta": 0.0125,
         "primal_tol": 1e-3,
         "dual_tol": 1e-4,
-        "n_households": 100, 
-        "n_firms": 50,
+        "n_households": 1000, 
+        "n_firms": 250,
     }
     
     out_dir = SCRIPTS_DIR.parent / "Results" / "Comparison" / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -119,49 +116,60 @@ def run_ensemble(n_runs=20, n_quarters=8):
     collector = WelfareTrajectoryCollector(n_runs, n_quarters)
     plotter = ProfessionalPlotter(out_dir)
     
-    print(f"Starting Welfare Comparison Ensemble: {n_runs} runs.")
     start_time = time.time()
     
+    # Phase 1: Learning Planner
+    print(f"--- Phase 1: Learning Planner Ensemble ({n_runs} runs) ---")
     for i in range(n_runs):
         run_start = time.time()
         try:
-            # Calibrate base
             state_base = calibrate(data, **config)
-            
-            # Learning Run
             state_learn = deepcopy(state_base)
             state_learn.rng = np.random.default_rng(2000 + i)
-            w_learn = []
+            
+            w_traj = []
             for q in range(n_quarters):
                 run_quarter(state_learn)
-                w_learn.append(calculate_welfare(state_learn))
+                w_traj.append(calculate_welfare(state_learn))
             
-            # Oracle Run
+            collector.welfare_learn[i, :] = w_traj
+            elapsed = time.time() - run_start
+            if (i+1) % 5 == 0 or i == 0:
+                print(f"  Learning Run {i+1}/{n_runs} complete ({elapsed:.1f}s)")
+        except Exception as e:
+            print(f"  Learning Run {i+1} failed: {e}")
+
+    # Phase 2: Oracle Planner
+    print(f"\n--- Phase 2: Oracle Planner Ensemble ({n_runs} runs) ---")
+    for i in range(n_runs):
+        run_start = time.time()
+        try:
+            state_base = calibrate(data, **config)
             state_oracle = deepcopy(state_base)
             state_oracle.rng = np.random.default_rng(2000 + i)
-            w_oracle = []
+            
+            w_traj = []
             for q in range(n_quarters):
                 state_oracle.alpha = get_oracle_belief(state_oracle)
                 run_quarter(state_oracle)
-                w_oracle.append(calculate_welfare(state_oracle))
+                w_traj.append(calculate_welfare(state_oracle))
             
-            collector.add_run(i, np.array(w_oracle), np.array(w_learn))
-            
+            collector.welfare_oracle[i, :] = w_traj
             elapsed = time.time() - run_start
-            print(f"  Run {i+1}/{n_runs} complete ({elapsed:.1f}s). Loss Q{n_quarters}: {collector.welfare_loss[i, -1]:.4f}%")
-            
-            if (i+1) % 5 == 0:
-                plotter.plot_fan(collector.welfare_loss, "Efficiency Loss vs Oracle", "Loss (%)", "welfare_loss")
-
+            if (i+1) % 5 == 0 or i == 0:
+                print(f"  Oracle Run {i+1}/{n_runs} complete ({elapsed:.1f}s)")
         except Exception as e:
-            print(f"  Run {i+1} failed: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"  Oracle Run {i+1} failed: {e}")
 
+    # Phase 3: Analysis
+    print("\n--- Phase 3: Comparative Analysis ---")
+    collector.compute_loss()
     plotter.plot_fan(collector.welfare_loss, "Efficiency Loss vs Oracle", "Loss (%)", "welfare_loss")
     
     avg_final = np.nanmean(collector.welfare_loss[:, -1])
-    print(f"\nEnsemble Complete. Average Final Welfare Loss: {avg_final:.4f}%")
+    total_time = time.time() - start_time
+    print(f"\nEnsemble Complete. Total Time: {total_time/60:.1f} mins")
+    print(f"Average Final Welfare Loss: {avg_final:.4f}%")
     print(f"Results saved to {out_dir}")
 
 if __name__ == "__main__":

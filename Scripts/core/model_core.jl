@@ -96,9 +96,10 @@ end
 """
     solve_planner_native(...)
 
-Solve the central planning optimization problem via FISTA (Nesterov-accelerated) dual ascent 
-with backtracking on the dual objective. Optimizes a CRRA aggregate welfare function 
-subject to material balance and resource constraints (Capital and Labor).
+Solve the central planning optimization problem via FISTA (Fast Iterative Shrinkage-Thresholding Algorithm).
+This dual ascent mechanism optimizes a CRRA/log aggregate welfare function subject to material 
+balance and resource constraints (Physical Capital and Labor). It uses a multiplicative-gradient 
+update in log-dual space for robustness and automatic non-negativity of shadow prices.
 """
 function solve_planner_native(alpha_v::Vector{Float64},
                               A_m::Matrix{Float64},
@@ -130,12 +131,9 @@ function solve_planner_native(alpha_v::Vector{Float64},
 
     K_eff = K_v .- Bt(dK_v)
     L_eff = L_total_f - dot(l_tilde_v, dK_v)
-    # Cold-start duals: π₀ = α / max(C_prev, ε)^σ
-    pi_init = alpha_v ./ max.(C_prev_v, 1e-4).^sigma_v
-
-    # Use the full vector space (no filtering of 'active' sectors)
-    log_lam_K = log.(max.(BtT(pi_init), 1e-10))
-    log_lam_L = log(sum(alpha_v) / max(n * L_eff, eps_val))
+    # Cold-start duals: Initialize all shadow prices to 1.0 (neutral baseline)
+    log_lam_K = zeros(n)
+    log_lam_L = 0.0
 
     log_y_K = copy(log_lam_K)
     log_y_L = log_lam_L
@@ -281,11 +279,11 @@ end
 """
     fast_loop_native(...)
 
-Operates the monthly market clearing loop. Includes:
-1. Dynamic evolution of consumer preferences (alpha) with persistence and shocks.
-2. Market-clearing price tatonnement using a Newton step on CRRA demand functions.
-3. Multi-household demand aggregation using common marginal utility (mu_t).
-4. Revealed preference inference (alpha_reveal) and cybernetic growth signal generation.
+Operates the high-frequency monthly market clearing engine. Includes:
+1. Dynamic evolution of consumer preferences (alpha) across individual households.
+2. Market-clearing price adjustment via tatonnement feedback on sector-level excess demand.
+3. Multi-household demand aggregation under a common planner marginal utility (mu_t).
+4. Revealed preference inference (alpha_reveal) and cybernetic resource allocation signals.
 """
 function fast_loop_native(P_base_v::Vector{Float64},
                           C_plan_v::Vector{Float64},
