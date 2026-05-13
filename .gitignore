@@ -17,10 +17,6 @@ env/
 Thumbs.db
 
 # ── Julia ──
-*.so
-*.toml
-*sysimage*
-_precompile_exec.jl
 Scripts/__pycache__/
 
 
