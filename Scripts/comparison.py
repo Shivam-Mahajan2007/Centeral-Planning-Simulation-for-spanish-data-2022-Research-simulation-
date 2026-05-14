@@ -19,7 +19,7 @@ sys.path.append(str(SCRIPTS_DIR))
 
 from data.data_loader import load_data
 from data.calibration import calibrate
-from engine.simulation import run_quarter
+from engine.simulation import run_quarter, run_simulation
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -33,8 +33,9 @@ class WelfareTrajectoryCollector:
         self.welfare_loss = np.full((n_runs, n_q), np.nan)
 
     def compute_loss(self):
-        # Only compute where both exist
         mask = (~np.isnan(self.welfare_oracle)) & (~np.isnan(self.welfare_learn))
+        # Welfare Loss (%) = (Oracle - Learning) / |Oracle| * 100
+        # Positive value = Oracle is better (expected).
         self.welfare_loss[mask] = (self.welfare_oracle[mask] - self.welfare_learn[mask]) / np.abs(self.welfare_oracle[mask]) * 100.0
 
 class ProfessionalPlotter:
@@ -63,29 +64,29 @@ class ProfessionalPlotter:
         plt.savefig(self.out_dir / f"fan_{filename}.pdf")
         plt.close()
 
-def calculate_welfare(state, alpha_true_h=None):
-    n_h = state.n_households
-    sig = state.sigma_vec
-    w_h = state.w_h
-    a_h = alpha_true_h if alpha_true_h is not None else state.alpha_true_h
-    P = state.P
-    mu = state.mu_planner * 3.0
+def calculate_welfare_from_history(h_record, sigma_vec):
+    """
+    Computes aggregate household welfare from a standardized history record.
+    Using the pre-saved C_h_star ensures we use the correct mu-scale and 
+    production constraints realization for that specific quarter.
+    """
+    a_h      = h_record["alpha_true_h"]  # realized household preferences
+    w_h      = h_record["w_h"]           # income-share weights
+    C_h_star = h_record["C_h_star"]      # realized consumption (already scaled/mu-chained)
+    sig      = sigma_vec
+
+    C_safe = np.maximum(C_h_star, 1e-12)
+    is_log = np.abs(sig - 1.0) < 1e-6
+    not_log = ~is_log
     
-    # C_hi* = (w_h * alpha_hi / (mu * P_i))^(1/sigma_i)
-    C_h_star = (w_h[:, None] * a_h / (mu * P[None, :])) ** (1.0 / sig[None, :])
-    
-    welfare = 0.0
-    for h in range(n_h):
-        h_welfare = 0.0
-        for i in range(state.n):
-            c_val = max(C_h_star[h, i], 1e-10)
-            if abs(sig[i] - 1.0) < 1e-6:
-                val = a_h[h, i] * np.log(c_val)
-            else:
-                val = a_h[h, i] * (c_val ** (1.0 - sig[i])) / (1.0 - sig[i])
-            h_welfare += val
-        welfare += w_h[h] * h_welfare
-    return welfare
+    u_mat = np.zeros_like(C_h_star)
+    if np.any(not_log):
+        s_vals = sig[not_log]
+        u_mat[:, not_log] = a_h[:, not_log] * (C_safe[:, not_log]**(1.0 - s_vals)) / (1.0 - s_vals)
+    if np.any(is_log):
+        u_mat[:, is_log] = a_h[:, is_log] * np.log(C_safe[:, is_log])
+        
+    return np.sum(w_h[:, None] * u_mat)
 
 def get_oracle_belief(state):
     n = state.n
@@ -98,7 +99,7 @@ def get_oracle_belief(state):
     a_agg /= a_agg.sum()
     return a_agg
 
-def run_ensemble(n_runs=20, n_quarters=8):
+def run_ensemble(n_runs=20, n_quarters=20):
     DATA_DIR = SCRIPTS_DIR.parent / "Data"
     data = load_data(DATA_DIR)
     
@@ -118,45 +119,53 @@ def run_ensemble(n_runs=20, n_quarters=8):
     
     start_time = time.time()
     
+    # Silence logger for clean ensemble output
+    logging.getLogger("engine.simulation").setLevel(logging.WARNING)
+    
     # Phase 1: Learning Planner
+    # Must use run_simulation to benefit from optimized vectorized kernels
     print(f"--- Phase 1: Learning Planner Ensemble ({n_runs} runs) ---")
     for i in range(n_runs):
         run_start = time.time()
         try:
-            state_base = calibrate(data, **config)
-            state_learn = deepcopy(state_base)
-            state_learn.rng = np.random.default_rng(2000 + i)
+            state = calibrate(data, **config)
+            state.rng = np.random.default_rng(2000 + i)
+            state.slim_history = True 
             
-            w_traj = []
-            for q in range(n_quarters):
-                run_quarter(state_learn)
-                w_traj.append(calculate_welfare(state_learn))
+            # Execute full simulation
+            state = run_simulation(state, n_quarters=n_quarters)
             
+            # Extract welfare strictly from history records
+            w_traj = [calculate_welfare_from_history(h, state.sigma_vec) for h in state.history]
             collector.welfare_learn[i, :] = w_traj
+            
             elapsed = time.time() - run_start
-            if (i+1) % 5 == 0 or i == 0:
+            if (i+1) % 10 == 0 or i == 0:
                 print(f"  Learning Run {i+1}/{n_runs} complete ({elapsed:.1f}s)")
         except Exception as e:
             print(f"  Learning Run {i+1} failed: {e}")
 
     # Phase 2: Oracle Planner
+    # Oracle uses the same logic but injects true preference belief at each step.
     print(f"\n--- Phase 2: Oracle Planner Ensemble ({n_runs} runs) ---")
     for i in range(n_runs):
         run_start = time.time()
         try:
-            state_base = calibrate(data, **config)
-            state_oracle = deepcopy(state_base)
+            state_oracle = calibrate(data, **config)
             state_oracle.rng = np.random.default_rng(2000 + i)
+            state_oracle.slim_history = True
             
-            w_traj = []
             for q in range(n_quarters):
+                # Endow planner with perfect preference knowledge
                 state_oracle.alpha = get_oracle_belief(state_oracle)
                 run_quarter(state_oracle)
-                w_traj.append(calculate_welfare(state_oracle))
             
+            # Extract welfare strictly from history records (same path as Phase 1)
+            w_traj = [calculate_welfare_from_history(h, state_oracle.sigma_vec) for h in state_oracle.history]
             collector.welfare_oracle[i, :] = w_traj
+            
             elapsed = time.time() - run_start
-            if (i+1) % 5 == 0 or i == 0:
+            if (i+1) % 10 == 0 or i == 0:
                 print(f"  Oracle Run {i+1}/{n_runs} complete ({elapsed:.1f}s)")
         except Exception as e:
             print(f"  Oracle Run {i+1} failed: {e}")
@@ -176,7 +185,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=10)
-    parser.add_argument("--quarters", type=int, default=8)
+    parser.add_argument("--quarters", type=int, default=20)
     args = parser.parse_args()
     
     run_ensemble(n_runs=args.runs, n_quarters=args.quarters)

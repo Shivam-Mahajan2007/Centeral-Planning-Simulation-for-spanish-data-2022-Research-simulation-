@@ -318,6 +318,9 @@ function fast_loop_native(P_base_v::Vector{Float64},
     local alpha_h_ev
     if multi_hh; alpha_h_ev = copy(alpha_h); end
 
+    # Rational soft-clamp: f(s, s_max) = s / (1 + |s|/s_max)
+    soft_clamp(s, s_max) = s ./ (1.0 .+ abs.(s) ./ s_max)
+
     n = length(P_base_v)
     C_m     = C_plan_v ./ n_months
     Y_m     = Y_f / n_months
@@ -397,23 +400,16 @@ function fast_loop_native(P_base_v::Vector{Float64},
         log_f_norm = ifelse.(a_f .> 1e-25, log.(max.(a_f, 1e-30)), -25.0)
 
         if multi_hh
-            log_sh = log_f_norm
-            Threads.@threads for h in 1:n_h_count
-                for i in 1:n
-                    if active[i]
-                        log_ah = alpha_h_ev[h, i] > 1e-25 ? log(alpha_h_ev[h, i]) : -25.0
-                        drift_h = theta_drift * (log_sh[i] - log_ah)
-                        alpha_h_ev[h, i] = exp(log_ah + drift_h +
-                                               hh_shocks_drift[tau, h, i] +
-                                               hh_shocks_noise[tau, h, i])
-                    end
-                end
-                # Normalize row-wise after update
-                row_sum = sum(@view alpha_h_ev[h, :])
-                if row_sum > 1e-30
-                    alpha_h_ev[h, :] ./= row_sum
-                end
-            end
+            # Vectorized multi-household preference evolution:
+            # log_ah = log(alpha_h)
+            # drift = theta * (log_f - log_ah)
+            # alpha_new = exp(log_ah + drift + shocks)
+            log_ah_ev = log.(max.(alpha_h_ev, 1e-30))
+            alpha_h_ev .= exp.(log_ah_ev .+ theta_drift .* (log_f_norm' .- log_ah_ev) .+ 
+                               @view(hh_shocks_drift[tau, :, :]) .+ @view(hh_shocks_noise[tau, :, :]))
+            
+            # Normalize row-wise (households)
+            alpha_h_ev ./= max.(sum(alpha_h_ev, dims=2), 1e-30)
         end
 
         P_iter = copy(P_base_v)
@@ -422,22 +418,19 @@ function fast_loop_native(P_base_v::Vector{Float64},
         for _ in 1:max_price_iter
             C_d_iter = zeros(n)
             if multi_hh
-                # Pre-allocate household demand matrix for thread-safe reduction
-                C_h_demands = zeros(n_h_count, n)
-                Threads.@threads for h in 1:n_h_count
-                    # Demand with common mu: C_hi = (w_h * alpha_hi / (mu * P_i))^(1/sigma_i)
-                    C_h_demands[h, :] .= (w_h_v[h] .* alpha_h_ev[h, :] ./ (mu_t .* P_iter)).^(1.0 ./ sigma_v)
-                end
-                C_d_iter .= vec(sum(C_h_demands, dims=1))
+                # Fully vectorized demand across all households and sectors
+                # C_hi = (w_h * alpha_hi / (mu * P_i))^(1/sigma_i)
+                C_d_iter .= vec(sum((w_h_v .* alpha_h_ev ./ (mu_t .* P_iter')) .^ (1.0 ./ sigma_v'), dims=1))
             else
                 # Single aggregate household
                 C_d_iter .= (a_f ./ (mu_t .* P_iter)).^(1.0 ./ sigma_v)
             end
             
-            Z_iter = C_d_iter .- C_m
-            # P_new = P * (1 + sigma * Z/C)
-            P_iter = P_iter .* (1.0 .+ sigma_v .* price_step_cap .* Z_iter ./ max.(C_m, 1e-12))
-            P_iter = max.(P_iter, 1e-12)
+            Z_iter     = C_d_iter .- C_m
+            Z_iter_rel = (sigma_v .* Z_iter ./ max.(C_m, 1e-12))
+            # Apply soft rational clamp to the price update step
+            P_iter .= P_iter .* (1.0 .+ soft_clamp(Z_iter_rel, price_step_cap))
+            P_iter .= max.(P_iter, 1e-12)
 
             if maximum(abs.(Z_iter) ./ max.(C_m, 1e-12)) < 0.005
                 break
@@ -448,12 +441,8 @@ function fast_loop_native(P_base_v::Vector{Float64},
         # Realized consumption C_d
         C_d = zeros(n)
         if multi_hh
-            # Reuse logic for aggregate realized demand
-            C_h_realized = zeros(n_h_count, n)
-            Threads.@threads for h in 1:n_h_count
-                C_h_realized[h, :] .= (w_h_v[h] .* alpha_h_ev[h, :] ./ (mu_t .* P_clear)).^(1.0 ./ sigma_v)
-            end
-            C_d .= vec(sum(C_h_realized, dims=1))
+            # Reuse vectorized demand logic for aggregate realized demand
+            C_d .= vec(sum((w_h_v .* alpha_h_ev ./ (mu_t .* P_clear')) .^ (1.0 ./ sigma_v'), dims=1))
             resid_Y_star = isnothing(Y_h_m) ? 1.0 : sum(Y_h_m)
         else
             C_d .= (a_f ./ (mu_t .* P_clear)).^(1.0 ./ sigma_v)
@@ -468,7 +457,9 @@ function fast_loop_native(P_base_v::Vector{Float64},
         eps_i     = 1.0 ./ sigma_v
         delta_p   = (P_clear .- P_base_v) ./ max.(P_base_v, 1e-30)
         val       = eps_i .* delta_p
-        signal    = .-clamp.(val, -1.0, 1.0 / (rho_M + 1.0))
+        # Tanh-based rectified clamp: s = s_max * tanh(max(0, val)/s_max)
+        s_max     = 1.0 / (rho_M + 1.0)
+        signal    = .- (s_max .* tanh.(max.(0.0, val) ./ s_max))
         denom_sig = 1.0 .+ signal
         C_hat_sum .+= C_m ./ denom_sig
 
