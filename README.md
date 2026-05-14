@@ -8,7 +8,6 @@
 
 The simulation models a cybernetic planning system where resources are allocated based on revealed demand signals.
 
-<<<<<<< HEAD
 - **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99% and achieving a 7-10x speedup.
 =======
 - **FISTA Dual Ascent Solver**: A Nesterov-accelerated dual-ascent solver operating in log-space with backtracking line search and adaptive momentum restarts. Cold-started Lagrange multipliers ensure robustness to structural shifts between quarters. Converges in ~120 iterations (~380 MVPs) on the 65-sector benchmark.
