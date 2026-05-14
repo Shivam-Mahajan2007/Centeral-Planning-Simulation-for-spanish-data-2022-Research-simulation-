@@ -10,10 +10,9 @@ The simulation models a cybernetic planning system where resources are allocated
 
 - **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99% and achieving a 7-10x speedup.
 =======
-- **FISTA Dual Ascent Solver**: A Nesterov-accelerated dual-ascent solver operating in log-space with backtracking line search and adaptive momentum restarts. Cold-started Lagrange multipliers ensure robustness to structural shifts between quarters. Converges in ~120 iterations (~380 MVPs) on the 65-sector benchmark.
+- **Dual Ascent Solver**: A Nesterov-accelerated dual-ascent solver operating in log-space with backtracking line search and adaptive momentum restarts. Cold-started Lagrange multipliers ensure robustness to structural shifts between quarters. Converges in ~120 iterations (~380 MVPs) on the 65-sector benchmark.
 - **Multithreaded Market Clearing**: The monthly tâtonnement and household demand aggregation are parallelized via `Threads.@threads` in Julia for high-throughput execution across 1,000+ heterogeneous households.
 - **Vectorized Neumann Expansion**: Firm-level capital allocations are computed as a single batch operation in Julia, reducing cross-language IPC overhead by 99%.
->>>>>>> 8d7391d (major update: reorganization & comparative system)
 - **Decentralized Production (250 Firms)**: Sectoral capital is distributed across 250 independent firms. Each firm solves a local Linear Program natively via the **HiGHS Dual Simplex** solver.
 - **Micro-Aggregated Demand Side**: 1,000 heterogeneous households with CRRA utility functions and stochastic preference evolution.
 - **Oracle Welfare Benchmark**: A welfare comparison suite (`comparison.py`) evaluates the learning planner against a first-best Oracle with perfect preference information. Monte Carlo results confirm a welfare loss of ~0.1%.
